@@ -1,4 +1,5 @@
-FROM python:3.12-slim
+FROM ghcr.io/ukewea/python-talib:ubuntu24.04-python3.12
+# or try: techtrader/python-talib if the above doesn't work
 
 # System dependencies
 RUN apt-get update && apt-get install -y \
