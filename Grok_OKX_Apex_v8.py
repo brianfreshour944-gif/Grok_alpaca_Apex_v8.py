@@ -181,6 +181,7 @@ class Grok_OKX_Apex_v8:
                 await asyncio.sleep(10)
             finally:
                 await exchange.close()
+            
 
 if __name__ == "__main__":
     bot = Grok_OKX_Apex_v8(paper_mode=True)
