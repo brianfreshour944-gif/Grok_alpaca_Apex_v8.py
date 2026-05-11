@@ -1,16 +1,16 @@
-# We use 3.10 because it's the most stable "sweet spot" for pandas_ta
-FROM python:3.10-slim
+# Using 3.11 to satisfy pandas_ta requirements
+FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install basic system tools that pandas_ta sometimes needs to build
+# Install system tools needed for building some trading libraries
 RUN apt-get update && apt-get install -y \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
 COPY . .
 
-# We install them one by one to make sure pandas_ta doesn't trip over the others
+# Install the libraries one by one to ensure they stick
 RUN pip install --no-cache-dir ccxt pandas numpy tqdm
 RUN pip install --no-cache-dir pandas_ta
 
