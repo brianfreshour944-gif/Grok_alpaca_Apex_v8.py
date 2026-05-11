@@ -1,16 +1,18 @@
-# We use Python 3.12 because your logs show pandas-ta requires it
+
+# Use Python 3.12 for library compatibility
 FROM python:3.12-slim
 
 WORKDIR /app
 
-# Update pip to ensure smooth library installation
+# Upgrade pip to handle the modern libraries
 RUN pip install --upgrade pip
 
 # Copy your bot files
 COPY . .
 
-# Install the libraries. 
-RUN pip install --no-cache-dir ccxt pandas numpy tqdm pandas-ta
+# Install the libraries one by one
+RUN pip install --no-cache-dir ccxt pandas numpy tqdm
+RUN pip install --no-cache-dir pandas-ta
 
-# Run your bot script
+# Run your specific bot script
 CMD ["python3", "Grok_OKX_Apex_v8.py"]
