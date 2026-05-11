@@ -1,18 +1,16 @@
-# We use Python 3.10 as it has the best compatibility for pandas-ta
-FROM python:3.10-slim
+# Use Python 3.12 to meet the requirements of the latest pandas-ta
+FROM python:3.12-slim
 
 WORKDIR /app
 
-# Upgrade pip to help find the correct library versions
+# Upgrade pip immediately to handle modern library versions
 RUN pip install --upgrade pip
 
-# Copy your files into the container
+# Copy your bot files into the container
 COPY . .
 
-# Install requirements
-# We use a specific beta version of pandas-ta that avoids the version clash
-RUN pip install --no-cache-dir ccxt pandas numpy tqdm
-RUN pip install --no-cache-dir pandas-ta==0.3.14b0
+# Install libraries in one command to help pip resolve versions correctly
+RUN pip install --no-cache-dir ccxt pandas numpy pandas_ta tqdm
 
-# The command to run your bot
+# The command to start your bot
 CMD ["python3", "Grok_OKX_Apex_v8.py"]
