@@ -1,13 +1,14 @@
-FROM ghcr.io/ukewea/python-talib:ubuntu24.04-python3.12-20240915
+FROM techtrader/python-ta-lib:3.11
 
 WORKDIR /app
 
-# Upgrade pip (optional but good)
-RUN pip install --upgrade pip
+# Fix for Debian's externally-managed Python + install pip if needed
+RUN apt-get update && apt-get install -y python3-pip && \
+    pip install --upgrade pip --break-system-packages
 
-# Install Python dependencies
+# Copy and install your Python packages
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt --break-system-packages
 
 # Copy your bot code
 COPY . .
