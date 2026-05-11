@@ -1,16 +1,16 @@
-FROM techtrader/python-ta-lib:latest
+FROM techtrader/python-ta-lib:3.11
 
 WORKDIR /app
 
-# Upgrade pip
+# Upgrade pip (optional but good)
 RUN pip install --upgrade pip
 
-# Copy requirements and install Python packages
+# Install Python dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy your bot code
 COPY . .
 
-# Run the application
+# Start the bot
 CMD ["python3", "Grok_OKX_Apex_v8.py"]
