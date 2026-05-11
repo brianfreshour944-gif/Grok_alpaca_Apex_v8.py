@@ -1,5 +1,4 @@
-
-FROM python:3.10-slim
+FROM python:3.11-slim
 WORKDIR /app
 COPY . .
 RUN pip install --no-cache-dir ccxt pandas numpy pandas_ta tqdm
