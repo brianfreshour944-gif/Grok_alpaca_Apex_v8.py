@@ -2,11 +2,12 @@ FROM techtrader/python-ta-lib:3.11
 
 WORKDIR /app
 
-# Fix for Debian's externally-managed Python + install pip if needed
-RUN apt-get update && apt-get install -y python3-pip && \
+# Install pip and upgrade it safely
+RUN apt-get update && \
+    apt-get install -y python3-pip && \
     pip install --upgrade pip --break-system-packages
 
-# Copy and install your Python packages
+# Install your Python dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt --break-system-packages
 
