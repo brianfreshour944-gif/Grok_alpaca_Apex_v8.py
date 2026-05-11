@@ -1,16 +1,17 @@
-# Use Python 3.12 to meet the requirements of the latest pandas-ta
+# Use Python 3.12 for the best library support
 FROM python:3.12-slim
 
 WORKDIR /app
 
-# Upgrade pip immediately to handle modern library versions
+# Upgrade pip to handle the modern technical analysis libraries
 RUN pip install --upgrade pip
 
-# Copy your bot files into the container
+# Copy your bot code into the container
 COPY . .
 
-# Install libraries in one command to help pip resolve versions correctly
-RUN pip install --no-cache-dir ccxt pandas numpy pandas_ta tqdm
+# Install libraries. We use 'pandas-ta' (with a hyphen) for the installer.
+RUN pip install --no-cache-dir ccxt pandas numpy tqdm
+RUN pip install --no-cache-dir pandas-ta
 
-# The command to start your bot
+# Run your specific script
 CMD ["python3", "Grok_OKX_Apex_v8.py"]
