@@ -3,3 +3,4 @@ pandas
 numpy
 pandas-ta
 TA-Lib
+# add any other packages your bot uses
