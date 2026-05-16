@@ -1,6 +1,5 @@
-ccxt
-pandas
-numpy
-pandas-ta
-TA-Lib
-# add any other packages your bot uses
+ccxt==4.1.95
+pandas==2.1.4
+numpy==1.26.2
+pandas-ta==0.3.14b0
+torch==2.1.2 --index-url https://download.pytorch.org/whl/cpu
