@@ -1,39 +1,77 @@
-# Large directories
-node_modules/
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
 venv/
 env/
 .venv/
-__pycache__/
-*.pyc
+ENV/
+env.bak/
+venv.bak/
+
+# Git
 .git/
+.gitignore
+.gitattributes
+
+# IDE
 .vscode/
 .idea/
+*.swp
+*.swo
 
-# Large file types
-*.zip
-*.tar
-*.gz
-*.mp4
-*.avi
-*.mov
+# Logs and databases
+*.log
+*.sql
+*.sqlite
+*.db
+
+# Large data files
+*.csv
+*.parquet
+*.feather
+*.h5
+*.pkl
+*.pickle
+*.joblib
+
+# Models
+*.h5
+*.pth
+*.pt
+*.onnx
+*.pb
+
+# Images and media
 *.jpg
 *.jpeg
 *.png
 *.gif
+*.mp4
+*.avi
+*.mov
 *.mp3
 *.wav
-*.db
-*.sqlite
-*.parquet
 
-# Data folders
-data/
-datasets/
-models/
-outputs/
-logs/*.log
+# Archives
+*.zip
+*.tar
+*.gz
+*.rar
+*.7z
 
-# Virtual environments
-Lib/
-Scripts/
-include/
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# OctoBot specific (if present)
+user/logs/
+tentacles/
+*.tentacle
