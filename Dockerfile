@@ -9,7 +9,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Set the container working directory
 WORKDIR /app
 
-# Install all baseline, ML, and saving libraries required by your scripts
+# Install all data, trading, ML, and technical analysis libraries
 RUN pip install --no-cache-dir \
     pandas \
     numpy \
@@ -17,6 +17,7 @@ RUN pip install --no-cache-dir \
     asyncio \
     joblib \
     scikit-learn \
+    pandas_ta \
     torch --extra-index-url https://download.pytorch.org/whl/cpu
 
 # Copy all your project files into the container
