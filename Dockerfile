@@ -10,17 +10,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Set the container working directory
 WORKDIR /app
 
-# Install all data, trading, and ML libraries
-# Notice pandas_ta is now pulled straight from source via git
-RUN pip install --no-cache-dir \
-    pandas \
-    numpy \
-    alpaca-py \
-    asyncio \
-    joblib \
-    scikit-learn \
-    git+https://github.com/twopirllc/pandas-ta.git@development \
-    torch --extra-index-url https://download.pytorch.org/whl/cpu
+# Install all data, trading, and ML libraries in a solid single-line block to avoid parsing errors
+RUN pip install --no-cache-dir pandas numpy alpaca-py asyncio joblib scikit-learn git+https://github.com/twopirllc/pandas-ta.git@development torch --extra-index-url https://download.pytorch.org/whl/cpu
 
 # Copy all your project files into the container
 COPY . .
