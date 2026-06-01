@@ -1,20 +1,8 @@
-# Use a slim Python 3.11 base image
-FROM python:3.11-slim
-
-# Set non-interactive environment to prevent the debconf errors you saw
-ENV DEBIAN_FRONTEND=noninteractive
-
-# Set working directory
-WORKDIR /app
-
-# Copy only the requirements file first (Best Practice for Docker caching)
-COPY requirements.txt .
-
-# Install dependencies in one layer
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Copy the rest of the application code
-COPY . .
-
-# Run the entrypoint script
-CMD ["python", "train_transformer.py"]
+import pandas_ta as ta
+ModuleNotFoundError: No module named 'pandas_ta'
+Traceback (most recent call last):
+File "/app/train_transformer.py", line 19, in 
+from feature_engineering import add_features, FEATURE_COLS
+File "/app/feature_engineering.py", line 4, in 
+import pandas_ta as ta
+ModuleNotFoundError: No module named 'pandas_ta'
