@@ -31,21 +31,25 @@ class FinancialTimeSeriesDataset(Dataset):
 
     def _prepare_data(self, df):
         df = df.copy()
+        
+        # 1. Calculate target variables on raw dataframe first
         df['future_return'] = df['close'].pct_change(self.target_horizon).shift(-self.target_horizon)
-        df['label'] = (df['future_return'] > 0).astype(float) 
+        target_labels = (df['future_return'] > 0).astype(float).fillna(0).values
 
+        # 2. Run your technical analysis feature extractor
         df_features = add_features(df)
         
+        # 3. Pull the exact features specified for model inputs
         raw_data = df_features[FEATURE_COLS].values
-        labels = df_features['label'].fillna(0).values
 
+        # 4. Apply or fit standard scalers
         if self.scaler is None:
             self.scaler = StandardScaler()
             scaled_data = self.scaler.fit_transform(raw_data)
         else:
             scaled_data = self.scaler.transform(raw_data)
 
-        return scaled_data, labels
+        return scaled_data, target_labels
 
     def __len__(self):
         return len(self.data) - self.seq_len - self.target_horizon
@@ -62,7 +66,7 @@ def train_model(
     lr=3e-4,
     seq_len=32,
     embed_dim=128,
-    num_layers=8,
+    num_layers=8,  # Enforced 8 layers baseline
     num_q_heads=16,
     num_kv_heads=4,
     dropout=0.1,
@@ -72,11 +76,10 @@ def train_model(
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"Using device: {device}")
 
-    # FIXED: Fetch historical crypto data cleanly via Alpaca Client API
     logger.info("Fetching historical crypto training bars via Alpaca API...")
     client = CryptoHistoricalDataClient()
     
-    # Target past 60 days of hourly data to form a deep training canvas
+    # Fetch past 60 days of hourly data to form a deep training canvas
     start_time = datetime.now(timezone.utc) - timedelta(days=60)
     
     request_params = CryptoBarsRequest(
@@ -85,11 +88,9 @@ def train_model(
         start=start_time
     )
     
-    # Pull and shape the dataset out of the Alpaca return object
     bars = client.get_crypto_bars(request_params)
     df = bars.df.loc["BTC/USD"].copy()
     
-    # Format layout cleanly to align with pipeline requirements
     df.index = pd.to_datetime(df.index)
     df = df[['open', 'high', 'low', 'close', 'volume']]
 
@@ -171,5 +172,6 @@ def train_model(
 
 
 if __name__ == "__main__":
-    model = train_model(epochs=40, batch_size=16, lr=3e-4, seq_len=32)
+    # FIXED: Explicitly passing num_layers=8 to prevent default parameters from overriding structural layout
+    model = train_model(epochs=40, batch_size=16, lr=3e-4, seq_len=32, num_layers=8)
     logger.info("🎉 System training cycle complete.")
