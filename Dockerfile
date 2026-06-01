@@ -1,28 +1,20 @@
+# Use a slim Python 3.11 base image
 FROM python:3.11-slim
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    git \
-    && rm -rf /var/lib/apt/lists/*
+# Set non-interactive environment to prevent the debconf errors you saw
+ENV DEBIAN_FRONTEND=noninteractive
 
+# Set working directory
 WORKDIR /app
 
-# Install torch CPU first on its own (large, needs separate index)
-RUN pip install --no-cache-dir torch --extra-index-url https://download.pytorch.org/whl/cpu
+# Copy only the requirements file first (Best Practice for Docker caching)
+COPY requirements.txt .
 
-# Install everything else except pandas-ta
-RUN pip install --no-cache-dir \
-    pandas \
-    numpy \
-    alpaca-py \
-    joblib \
-    scikit-learn \
-    ccxt
+# Install dependencies in one layer
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Install pandas-ta from GitHub (PyPI has no ARM64 wheel)
-RUN pip install --no-cache-dir \
-    "git+https://github.com/twopirllc/pandas-ta.git@development"
-
+# Copy the rest of the application code
 COPY . .
 
-CMD ["python", "Grok_OKX_Apex_v8.py"]
+# Run the entrypoint script
+CMD ["python", "train_transformer.py"]
