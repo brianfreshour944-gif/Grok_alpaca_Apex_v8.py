@@ -4,4 +4,4 @@ torch
 joblib
 scikit-learn
 alpaca-py
-pandas_ta
+pandas-ta
