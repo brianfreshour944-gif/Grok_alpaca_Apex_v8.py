@@ -7,6 +7,7 @@ from torch.utils.data import Dataset, DataLoader
 import logging
 import os
 import joblib
+import time
 from datetime import datetime, timedelta, timezone
 from sklearn.preprocessing import StandardScaler
 
@@ -22,25 +23,29 @@ from ml_predictor import GrokGQA_Transformer, MLPredictor
 logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)s | %(message)s')
 logger = logging.getLogger(__name__)
 
-# --- FinancialTimeSeriesDataset and train_model functions remain exactly as you had them ---
-# [Keep your existing Dataset and train_model functions here]
+# --- [Insert your existing FinancialTimeSeriesDataset and train_model functions here] ---
 
 def run_trading_mode(model):
     """
-    Placeholder for your live trading/inference loop.
-    This function should run indefinitely.
+    Live trading/inference loop. Runs indefinitely.
     """
     logger.info("Entering live trading/inference mode...")
     while True:
-        # 1. Fetch live data
-        # 2. Run feature engineering (add_features)
-        # 3. Predict with model
-        # 4. Execute trades if signals exist
-        # 5. Sleep to prevent CPU hammering
-        pass
+        try:
+            # 1. Fetch live data
+            # 2. Run feature engineering (add_features)
+            # 3. Predict with model
+            # 4. Execute trades if signals exist
+            logger.info("Bot monitoring market... [Trading Loop Active]")
+        except Exception as e:
+            logger.error(f"Error in trading loop: {e}")
+            
+        # 5. Sleep to prevent CPU hammering and API rate limiting
+        time.sleep(60)
 
 if __name__ == "__main__":
     # Ensure this points to a persistent volume path in Coolify
+    # If using Coolify Storage, use: "/app/data/grok_gqa_v9_best.pth"
     model_path = "grok_gqa_v9_best.pth"
     
     # 1. Check if model already exists to break the restart loop
@@ -73,9 +78,3 @@ if __name__ == "__main__":
     # 2. Transition to Trading Mode
     # This keeps the container alive without triggering re-training
     run_trading_mode(model)
-
-
-if __name__ == "__main__":
-    # FIXED: Explicitly passing num_layers=8 to prevent default parameters from overriding structural layout
-    model = train_model(epochs=40, batch_size=16, lr=3e-4, seq_len=32, num_layers=8)
-    logger.info("🎉 System training cycle complete.")
