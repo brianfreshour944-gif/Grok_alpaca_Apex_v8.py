@@ -1,7 +1,7 @@
 # feature_engineering.py - Refined for robustness
 
 import pandas as pd
-import pandas_ta as ta
+import pandas_ta_classic as ta
 import numpy as np
 
 # Define the feature columns that will be used by the model
