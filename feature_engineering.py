@@ -1,6 +1,10 @@
 # feature_engineering.py - Refined for robustness
 
 import pandas as pd
+# Change this:
+# import pandas_ta as ta
+
+# To this:
 import pandas_ta_classic as ta
 import numpy as np
 
