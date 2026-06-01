@@ -4,4 +4,4 @@ torch
 joblib
 scikit-learn
 alpaca-py
-pandas-ta
+git+https://github.com/twopirllc/pandas-ta.git@development
