@@ -1,14 +1,17 @@
-# Use an official Python runtime as a parent image
 FROM python:3.11-slim
 
-# Prevent interactive prompts and set the working directory
+# Install system dependencies (git is required for installing from GitHub)
+RUN apt-get update && apt-get install -y \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
 ENV DEBIAN_FRONTEND=noninteractive
 WORKDIR /app
 
-# Copy requirements file first to take advantage of Docker caching
+# Copy requirements file
 COPY requirements.txt .
 
-# Install all dependencies
+# Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy the rest of your project code
