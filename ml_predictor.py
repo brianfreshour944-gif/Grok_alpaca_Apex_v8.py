@@ -1,11 +1,4 @@
 # ml_predictor.py — Fixed & Complete
-#
-# Key fixes vs previous version:
-#   1. Raises FileNotFoundError if model not found (no silent random-weight fallback)
-#   2. Loads and applies StandardScaler saved during training
-#   3. Uses seq_len=32 (not tail(512)) — matches training exactly
-#   4. Correct neutral defaults: rsi=50, macd=0 (not 0.5)
-#   5. Warns clearly if scaler missing so you know predictions are unreliable
 
 import torch
 import torch.nn as nn
@@ -13,14 +6,14 @@ import torch.nn.functional as F
 import numpy as np
 import os
 import joblib
-import pandas as pd # Import pandas for the predict method
+import pandas as pd 
 
 # Import feature engineering function and constants
 from feature_engineering import add_features, FEATURE_COLS, FEATURE_DEFAULTS
 
 
 # ==============================================================================
-# MODEL ARCHITECTURE  (must match train_transformer.py exactly)
+# MODEL ARCHITECTURE  (Matches train_transformer.py exactly)
 # ==============================================================================
 
 class GQA_TransformerBlock(nn.Module):
@@ -63,8 +56,8 @@ class GQA_TransformerBlock(nn.Module):
 
 class GrokGQA_Transformer(nn.Module):
     def __init__(
-        self, input_dim, seq_len,
-        embed_dim=128, num_layers=6, num_q_heads=16, num_kv_heads=4, dropout=0.1
+        self, input_dim, seq_len=32,  # Fixed: Default set to 32 steps
+        embed_dim=128, num_layers=8, num_q_heads=16, num_kv_heads=4, dropout=0.1  # Fixed: Default set to 8 layers
     ):
         super().__init__()
         self.input_projection = nn.Linear(input_dim, embed_dim)
@@ -79,13 +72,13 @@ class GrokGQA_Transformer(nn.Module):
 
     def forward(self, x):
         x = self.input_projection(x)
-        x = x + self.pos_encoder # No need for clone, broadcasting handles it
+        x = x + self.pos_encoder 
         x = self.dropout(x)
         for layer in self.layers:
             x = layer(x)
         x = self.norm(x)
         x = self.output_head(x[:, -1, :])
-        return torch.sigmoid(x) # Sigmoid for binary classification probability
+        return torch.sigmoid(x) 
 
 
 # ==============================================================================
@@ -95,8 +88,8 @@ class GrokGQA_Transformer(nn.Module):
 class MLPredictor:
     def __init__(
         self, model_path,
-        input_dim=len(FEATURE_COLS),  # Use FEATURE_COLS for input_dim
-        seq_len=5,    # Must match training script's seq_len
+        input_dim=len(FEATURE_COLS),  
+        seq_len=32,    # Fixed: Standard default value safely matched to 32
         embed_dim=128, num_layers=8, num_q_heads=16, num_kv_heads=4,
         dropout=0.1
     ):
@@ -115,7 +108,7 @@ class MLPredictor:
         self.model.load_state_dict(torch.load(model_path, map_location=self.device))
         self.model.eval()
 
-        self.seq_len = seq_len # Store seq_len for correct slicing
+        self.seq_len = seq_len 
 
         # FIX 2: Load StandardScaler if available
         scaler_path = os.path.join(os.path.dirname(model_path), 'feature_scaler.pkl')
@@ -135,9 +128,9 @@ class MLPredictor:
     def predict(self, df: pd.DataFrame) -> float:
         """
         Returns a float in [0, 1].
-        >0.6  → bullish signal
-        <0.4  → bearish signal
-        ~0.5  → no signal (or model uncertain)
+        >0.51  → bullish signal (loosened bounds)
+        <0.49  → bearish signal (loosened bounds)
+        ~0.5   → no signal (or model uncertain)
         """
         try:
             df = df.copy()
@@ -145,7 +138,7 @@ class MLPredictor:
             # Use the centralized feature engineering function
             df_features = add_features(df)
 
-            # Ensure feature columns are present and in order
+            # Extract the exact sequence chunk needed for inference matrix shape
             data = df_features[FEATURE_COLS].tail(self.seq_len).values.astype(np.float32)
 
             if len(data) < self.seq_len:
