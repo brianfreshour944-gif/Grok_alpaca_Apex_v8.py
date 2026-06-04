@@ -1,7 +1,7 @@
-pandas
-numpy
-torch
-joblib
-scikit-learn
-alpaca-py
-pandas-ta-classic
+pandas==2.2.2
+numpy==1.26.4
+torch==2.2.2 --index-url https://download.pytorch.org/whl/cpu
+joblib==1.4.2
+scikit-learn==1.4.2
+alpaca-py==0.33.0
+pandas-ta-classic==0.3.14b0
