@@ -4,14 +4,14 @@ import numpy as np
 import pandas as pd
 import logging
 
-# Import the centralized feature engineering function
+# Centralized feature engineering utilities
 from feature_engineering import add_features, FEATURE_COLS
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)s | %(message)s')
 logger = logging.getLogger(__name__)
 
 class TradingEnv(gym.Env):
-    """Custom Trading Environment that follows gymnasium interface."""
+    """Custom Trading Environment that follows the standard gymnasium interface."""
 
     metadata = {'render_modes': ['human'], 'render_fps': 3}
 
@@ -20,20 +20,25 @@ class TradingEnv(gym.Env):
         historical_df: pd.DataFrame,
         initial_capital: float = 10000.0,
         transaction_cost: float = 0.001,
-        seq_len: int = 5,
+        seq_len: int = 32, # Locked securely to your 8-layer model dimensions
         reward_type: str = 'portfolio_return',
     ):
         super().__init__()
 
-        self.historical_df = historical_df.copy()
+        # SPEED FIX: Run feature engineering once on the entire dataframe during startup
+        logger.info("Pre-calculating technical indicators across dataset columns...")
+        processed_df = add_features(historical_df)
+        
+        self.historical_df = processed_df.copy()
         self.initial_capital = initial_capital
         self.transaction_cost = transaction_cost
         self.seq_len = seq_len
         self.reward_type = reward_type
 
+        # Actions: 0 = BUY, 1 = HOLD, 2 = SELL
         self.action_space = spaces.Discrete(3)
 
-        # Define observation space using the actual number of features
+        # Define observation space matrix sizes explicitly
         num_features = len(FEATURE_COLS)
         self.observation_space = spaces.Box(
             low=-np.inf, high=np.inf, shape=(self.seq_len, num_features), dtype=np.float32
@@ -46,23 +51,17 @@ class TradingEnv(gym.Env):
         self.trades = []
         self.equity_curve = []
 
-        logger.info("Trading Environment Initialized.")
+        logger.info("Trading Environment Initialized successfully.")
 
     def _get_observation(self):
+        # Grabs perfectly computed slices directly from memory instantly
         end_index = self._current_step + 1
-        start_index = max(0, end_index - self.seq_len)
+        start_index = end_index - self.seq_len
 
-        obs_df = self.historical_df.iloc[start_index:end_index].copy()
+        # Pull the ready matrix chunk slice directly
+        obs_matrix = self.historical_df.iloc[start_index:end_index][FEATURE_COLS].values
 
-        # Use the centralized feature engineering function
-        observation = add_features(obs_df).values
-
-        # Pad with zeros if not enough data points for the sequence length
-        if len(observation) < self.seq_len:
-            padding = np.zeros((self.seq_len - len(observation), observation.shape[1]))
-            observation = np.vstack([padding, observation])
-
-        return observation.astype(np.float32)
+        return obs_matrix.astype(np.float32)
 
     def _get_info(self):
         return {
@@ -74,7 +73,9 @@ class TradingEnv(gym.Env):
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
-        self._current_step = self.seq_len -1
+        
+        # Starts loop directly where a full sequence window is already fully available
+        self._current_step = self.seq_len - 1
         self.current_capital = self.initial_capital
         self.current_position = 0
         self.portfolio_value = self.initial_capital
@@ -89,17 +90,17 @@ class TradingEnv(gym.Env):
     def step(self, action):
         self._current_step += 1
 
-        if self._current_step >= len(self.historical_df): # End of episode
+        # Check for out-of-bounds array termination signals
+        if self._current_step >= len(self.historical_df): 
             return (
-                self._get_observation(),
-                self._calculate_reward(),
+                np.zeros(self.observation_space.shape, dtype=np.float32),
+                0.0,
                 True,
                 False,
-                self._get_info()
+                {**self._get_info(), "current_price": self.historical_df['close'].iloc[-1]}
             )
 
         current_price = self.historical_df['close'].iloc[self._current_step]
-        reward = 0.0
 
         if action == 0:  # BUY
             if self.current_position == 0:
@@ -113,6 +114,7 @@ class TradingEnv(gym.Env):
                     'units': units_to_buy
                 })
                 logger.debug(f"[{self.historical_df.index[self._current_step]}] BUY @ {current_price:.2f}")
+                
         elif action == 2: # SELL
             if self.current_position > 0:
                 self.current_capital = self.current_position * current_price * (1 - self.transaction_cost)
@@ -125,6 +127,7 @@ class TradingEnv(gym.Env):
                 self.current_position = 0
                 logger.debug(f"[{self.historical_df.index[self._current_step]}] SELL @ {current_price:.2f}")
 
+        # Refresh ledger records balance tracking variables
         self.portfolio_value = self.current_capital
         if self.current_position > 0:
             self.portfolio_value += self.current_position * current_price
