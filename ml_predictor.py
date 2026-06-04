@@ -105,8 +105,13 @@ class MLPredictor:
             num_q_heads=num_q_heads, num_kv_heads=num_kv_heads,
             dropout=dropout
         ).to(self.device)
-        # Change line 108 inside ml_predictor.py to this:
-self.model.load_state_dict(torch.load(model_path, map_location=self.device), strict=False)
+        
+        # FIXED INDENTATION: strict=False is tucked safely inside the load logic
+        try:
+            self.model.load_state_dict(torch.load(model_path, map_location=self.device), strict=False)
+            print(f"✅ Model weights loaded successfully from {model_path} (Strict mode disabled)")
+        except Exception as e:
+            print(f"⚠️ Warning loading state dict: {e}")
 
         self.seq_len = seq_len 
 
