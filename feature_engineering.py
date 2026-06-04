@@ -1,10 +1,6 @@
 # feature_engineering.py - Refined for robustness
 
 import pandas as pd
-# Change this:
-# import pandas_ta as ta
-
-# To this:
 import pandas_ta_classic as ta
 import numpy as np
 
@@ -18,8 +14,8 @@ FEATURE_COLS = [
 FEATURE_DEFAULTS = {
     'returns': 0.0,
     'vol_14': 0.0,
-    'rsi': 50.0, # Neutral RSI
-    'macd': 0.0, # Neutral MACD
+    'rsi': 50.0,    # Neutral RSI
+    'macd': 0.0,    # Neutral MACD
     'atr': 0.0,
     'bb_width': 0.0
 }
@@ -33,11 +29,10 @@ def add_features(df: pd.DataFrame) -> pd.DataFrame:
         df (pd.DataFrame): Input DataFrame with 'open', 'high', 'low', 'close', 'volume' columns.
 
     Returns:
-        pd.DataFrame: DataFrame with added features.
+        pd.DataFrame: DataFrame with added features, structured exactly for the GQA Transformer.
     """
     if df.empty:
-        # Return an empty DataFrame with FEATURE_COLS as columns, filled with defaults or NaN
-        # For consistency, it's better to return a DataFrame that the environment expects
+        # Return an empty DataFrame with FEATURE_COLS as columns, filled with defaults
         return pd.DataFrame(index=df.index, columns=FEATURE_COLS).fillna(FEATURE_DEFAULTS)
 
     df_copy = df.copy() # Work on a copy to avoid SettingWithCopyWarning
@@ -47,10 +42,9 @@ def add_features(df: pd.DataFrame) -> pd.DataFrame:
         if col not in df_copy.columns:
             print(f"Warning: Missing critical column '{col}' in DataFrame for feature engineering.")
             # Create a DataFrame with default values for missing critical columns
-            # and fill other features with defaults as they cannot be calculated.
             temp_df = pd.DataFrame(index=df.index, columns=FEATURE_COLS)
             for feature in FEATURE_COLS:
-                temp_df[feature] = FEATURE_DEFAULTS.get(feature, 0.0) # Use 0.0 as generic default
+                temp_df[feature] = FEATURE_DEFAULTS.get(feature, 0.0) 
             return temp_df
         df_copy[col] = pd.to_numeric(df_copy[col], errors='coerce')
 
@@ -58,10 +52,9 @@ def add_features(df: pd.DataFrame) -> pd.DataFrame:
     df_copy['returns'] = df_copy['close'].pct_change().fillna(0)
 
     # Calculate 'vol_14' (simple rolling standard deviation of returns)
-    # Assign NaN and fill later, consistent with how pandas_ta results are handled.
     df_copy['vol_14'] = df_copy['returns'].rolling(window=14).std()
 
-    # Apply pandas_ta indicators
+    # Apply pandas_ta indicators safely
     # RSI
     df_copy['rsi'] = ta.rsi(df_copy['close'], length=14)
 
@@ -82,20 +75,21 @@ def add_features(df: pd.DataFrame) -> pd.DataFrame:
     else:
         df_copy['bb_width'] = np.nan
 
-    # Fill any remaining NaNs created by feature calculation (e.g., at the beginning of the series)
-    # Use ffill() and bfill() to propagate valid observations
+    # Fill rolling windows NaNs at the very beginning of the dataset series
+    # Using forward fill first to preserve valid recent observations, then backfill
     df_copy = df_copy.ffill().bfill()
 
-    # Fill any remaining NaNs with FEATURE_DEFAULTS values
+    # Hard safeguard: Fill any remaining NaNs with hardcoded neutral FEATURE_DEFAULTS values
     for col, default_val in FEATURE_DEFAULTS.items():
         if col in df_copy.columns:
             df_copy[col] = df_copy[col].fillna(default_val)
         else:
-            # Ensure all FEATURE_COLS are present, even if no data was available to calculate them
+            # Ensure all FEATURE_COLS are present, even if data was missing to calculate them
             df_copy[col] = default_val
 
-    # Final check to ensure all FEATURE_COLS are present and in order
+    # Final check to guarantee column sorting order matches training matrices perfectly
     for col in FEATURE_COLS:
         if col not in df_copy.columns:
             df_copy[col] = FEATURE_DEFAULTS.get(col, 0.0)
+            
     return df_copy[FEATURE_COLS]
