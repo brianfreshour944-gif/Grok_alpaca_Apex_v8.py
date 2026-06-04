@@ -105,8 +105,8 @@ class MLPredictor:
             num_q_heads=num_q_heads, num_kv_heads=num_kv_heads,
             dropout=dropout
         ).to(self.device)
-        self.model.load_state_dict(torch.load(model_path, map_location=self.device))
-        self.model.eval()
+        # Change line 108 inside ml_predictor.py to this:
+self.model.load_state_dict(torch.load(model_path, map_location=self.device), strict=False)
 
         self.seq_len = seq_len 
 
