@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# PRODUCTION READY — ALPACA DEEP LEARNING ENGINE WITH INTEGRATED ASYNC FORWARD LEARNING
+# PRODUCTION READY — 8-LAYER ALPACA DEEP LEARNING ENGINE WITH INTEGRATED ASYNC FORWARD LEARNING
 
 import asyncio
 import pandas as pd
@@ -88,9 +88,9 @@ def fetch_historical_training_data(days=120):
     df = bars.df.xs(SYMBOL)
     return df
 
-def train_model(epochs=15, batch_size=64, lr=3e-4, is_refit=False):
+def train_model(epochs=15, batch_size=128, lr=3e-4, is_refit=False):
     """Handles dataset generation, feature scaling tracking, and model training loops."""
-    logger.info(f"Starting model optimization routine (Is Re-fit: {is_refit})...")
+    logger.info(f"Starting 8-layer model optimization routine (Is Re-fit: {is_refit})...")
     
     try:
         raw_df = fetch_historical_training_data(days=120) 
@@ -103,14 +103,14 @@ def train_model(epochs=15, batch_size=64, lr=3e-4, is_refit=False):
         dataset = FinancialTimeSeriesDataset(scaled_features, processed_df, seq_len=SEQ_LEN)
         dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=True)
         
-        # OPTIMIZED: Hardened architecture footprint to slash computational delays on cloud nodes
+        # RESTORED: Full 8-layer architectural depth for maximum abstraction capability
         model = GrokGQA_Transformer(
             input_dim=len(FEATURE_COLS),
             seq_len=SEQ_LEN,
             embed_dim=128,
-            num_layers=4,        # Cut from 8 to 4 for lightning-fast execution
-            num_q_heads=8,        # Optimized head matrix split sizes
-            num_kv_heads=2,       # Preserves perfect 4:1 GQA framework ratio
+            num_layers=8,        # Kept at 8 layers per user request
+            num_q_heads=16,       
+            num_kv_heads=4,       
             dropout=0.1
         )
         
@@ -118,7 +118,7 @@ def train_model(epochs=15, batch_size=64, lr=3e-4, is_refit=False):
         if is_refit and os.path.exists(MODEL_PATH):
             try:
                 model.load_state_dict(torch.load(MODEL_PATH))
-                logger.info("Loaded previous weights to accelerate convergence fine-tuning.")
+                logger.info("Loaded previous 8-layer weights to accelerate convergence fine-tuning.")
                 lr = 1e-4  # Drop learning rate down for fine-tuning stability
             except Exception as e:
                 logger.warning(f"Could not warm-start weights, training from scratch: {e}")
@@ -214,7 +214,7 @@ async def nightly_refit_task():
             
             logger.info("⏰ Midnight UTC reached. Initiating background forward learning re-fit cycle...")
             # Run a 10-epoch fine-tune setup using current model weights as seed baseline
-            await asyncio.to_thread(train_model, epochs=10, batch_size=64, is_refit=True)
+            await asyncio.to_thread(train_model, epochs=10, batch_size=128, is_refit=True)
             logger.info("🎉 Nightly forward learning optimization round finished successfully.")
             
             # Extra safety buffer delay to prevent multi-trigger glitches inside the midnight timestamp second
@@ -290,8 +290,8 @@ async def main():
         logger.info(f"Existing model and scaler files located at {MODEL_PATH}. Skipping initialization training.")
     else:
         logger.info("Missing essential model components. Starting baseline training lifecycle...")
-        # Increased batch size to 64 and restricted epochs to 15 to ensure swift container lifecycles
-        await asyncio.to_thread(train_model, epochs=15, batch_size=64, is_refit=False)
+        # Increased batch size to 128 to ensure 8 layers run smoothly on CPU instances
+        await asyncio.to_thread(train_model, epochs=15, batch_size=128, is_refit=False)
         logger.info("🎉 Initial baseline training cycle complete.")
 
     # Execute both loops simultaneously inside the async runtime ecosystem
