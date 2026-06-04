@@ -31,7 +31,7 @@ SYMBOL = "BTC/USD"
 TIMEFRAME = TimeFrame.Hour
 SEQ_LEN = 32
 MODEL_PATH = "/app/data/grok_gqa_v9_best.pth" if os.path.exists("/app/data") else "grok_gqa_v9_best.pth"
-SCALER_PATH = MODEL_PATH.replace(".pth", "_scaler.pkl")
+SCALER_PATH = os.path.join(os.path.dirname(MODEL_PATH) if os.path.dirname(MODEL_PATH) else "", 'feature_scaler.pkl')
 
 # Fetch keys securely from Coolify UI environment settings
 API_KEY = os.getenv("APCA_API_KEY_ID")
@@ -54,7 +54,7 @@ class FinancialTimeSeriesDataset(Dataset):
     def __init__(self, df_features, seq_len=32):
         self.seq_len = seq_len
         
-        # Scale the features
+        # Scale the features safely across history
         self.scaler = StandardScaler()
         scaled_data = self.scaler.fit_transform(df_features[FEATURE_COLS].values)
         
@@ -73,7 +73,7 @@ class FinancialTimeSeriesDataset(Dataset):
         return torch.tensor(X_seq, dtype=torch.float32), torch.tensor(y_target, dtype=torch.float32)
 
 # --- 2. PyTorch Training Engine ---
-def fetch_historical_training_data(days=365):
+def fetch_historical_training_data(days=180):
     """Fetches high-volume historic data to feed initial model optimizations."""
     logger.info(f"Fetching {days} days of historical training bars for {SYMBOL}...")
     start_time = datetime.now(timezone.utc) - timedelta(days=days)
@@ -92,7 +92,7 @@ def train_model(epochs=40, batch_size=16, lr=3e-4, seq_len=32, num_layers=8):
     logger.info("Starting model training routine...")
     
     try:
-        raw_df = fetch_historical_training_data(days=180) # 6 months of lookback hourly data
+        raw_df = fetch_historical_training_data(days=180) 
         processed_df = add_features(raw_df)
         
         dataset = FinancialTimeSeriesDataset(processed_df, seq_len=seq_len)
@@ -109,7 +109,8 @@ def train_model(epochs=40, batch_size=16, lr=3e-4, seq_len=32, num_layers=8):
             dropout=0.1
         )
         
-        criterion = nn.BCEWithLogitsLoss()
+        # FIXED: Use BCELoss because GrokGQA_Transformer internally applies torch.sigmoid()
+        criterion = nn.BCELoss()
         optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
         
         model.train()
@@ -127,12 +128,13 @@ def train_model(epochs=40, batch_size=16, lr=3e-4, seq_len=32, num_layers=8):
                 logger.info(f"Epoch {epoch+1:02d}/{epochs} | Loss: {total_loss / len(dataloader):.4f}")
         
         # Save training assets for quick recovery container reboots
-        os.makedirs(os.path.dirname(MODEL_PATH), exist_ok=True) if os.path.dirname(MODEL_PATH) else None
+        if os.path.dirname(MODEL_PATH):
+            os.makedirs(os.path.dirname(MODEL_PATH), exist_ok=True)
+            
         torch.save(model.state_dict(), MODEL_PATH)
         joblib.dump(dataset.scaler, SCALER_PATH)
         logger.info(f"💾 Model artifact saved to '{MODEL_PATH}' and Scaler to '{SCALER_PATH}'")
         
-        model.eval()
         return model
         
     except Exception as e:
@@ -150,8 +152,8 @@ def execute_trade_signal(prediction_prob, position_active):
         logger.info(f"🔮 Bullish Signal ({prediction_prob:.2%}). Executing BUY order.")
         try:
             order_data = MarketOrderRequest(
-                symbol=SYMBOL.replace("/", ""), # Convert BTC/USD to BTCUSD for order execution
-                qty=0.001, # Keep order minimum tiny for baseline execution confirmation
+                symbol=SYMBOL.replace("/", ""), 
+                qty=0.001, 
                 side=OrderSide.BUY,
                 time_in_force=TimeInForce.GTC
             )
@@ -177,23 +179,18 @@ def execute_trade_signal(prediction_prob, position_active):
     else:
         logger.info(f"Neutral zone ({prediction_prob:.2%}). No trade adjustments made.")
 
-def run_trading_mode(model):
+def run_trading_mode():
     """
-    Live trading/inference loop. Runs indefinitely, protecting from rate limits.
+    Live trading/inference loop. Runs indefinitely, leveraging MLPredictor for safety.
     """
-    logger.info("Entering live trading/inference mode...")
+    logger.info("Entering live trading/inference mode via MLPredictor...")
     
-    # Load scaling tracking object 
-    if os.path.exists(SCALER_PATH):
-        scaler = joblib.load(SCALER_PATH)
-    else:
-        logger.warning("No existing scaler artifact detected. Instantiating a default live standardizer.")
-        scaler = StandardScaler()
+    # FIXED: Offload scaling, validation, and shape matching safely to MLPredictor wrapper
+    predictor = MLPredictor(model_path=MODEL_PATH, seq_len=SEQ_LEN)
     
     while True:
         try:
-            # 1. Fetch live technical inference sequences
-            # Get data for past 72 hours to ensure enough rows are available for feature generation lags
+            # 1. Fetch live raw technical inference sequences (72-hour window lookback)
             lookback_start = datetime.now(timezone.utc) - timedelta(days=3)
             request_params = CryptoBarsRequest(
                 symbol_or_symbols=[SYMBOL],
@@ -203,33 +200,11 @@ def run_trading_mode(model):
             live_bars = data_client.get_crypto_bars(request_params)
             df_live = live_bars.df.xs(SYMBOL)
             
-            # 2. Run feature engineering 
-            df_features = add_features(df_live)
+            # 2. Compute prediction using our clean MLPredictor logic wrapper
+            # This handles add_features, data sequence tail tracking, and scaling automatically
+            probability = predictor.predict(df_live)
             
-            if len(df_features) < SEQ_LEN:
-                logger.warning(f"Insufficient real-time sequence historical bars. Have {len(df_features)}, need {SEQ_LEN}. Waiting next iteration.")
-                time.sleep(60)
-                continue
-                
-            # Pull the most current available complete sequence trailing metrics
-            recent_sequence = df_features[FEATURE_COLS].tail(SEQ_LEN).values
-            
-            # Apply identical scaling transformations as training parameters
-            try:
-                scaled_sequence = scaler.transform(recent_sequence)
-            except Exception:
-                # Fallback safeguard option if scaler bounds mismatch columns
-                scaled_sequence = scaler.fit_transform(recent_sequence)
-                
-            # Convert matrix elements into expected model tensor shapes [Batch Size=1, Seq Len, Feature Dimensions]
-            tensor_input = torch.tensor(scaled_sequence, dtype=torch.float32).unsqueeze(0)
-            
-            # 3. Predict with model
-            with torch.no_grad():
-                logits = model(tensor_input).squeeze(-1)
-                probability = torch.sigmoid(logits).item() # Map output directly to bounded probability range [0, 1]
-            
-            # Check positional stance tracking directly via Alpaca's current ledger
+            # 3. Check positional stance tracking directly via Alpaca's current ledger
             try:
                 positions = trading_client.get_all_positions()
                 position_active = any(p.symbol == SYMBOL.replace("/", "") for p in positions)
@@ -244,40 +219,17 @@ def run_trading_mode(model):
         except Exception as e:
             logger.error(f"Error in trading loop: {e}")
             
-        # 5. Sleep 15 minutes to align with market bar evaluation pacing and prevent API hammer
+        # 5. Sleep 15 minutes to align with tracking loops
         time.sleep(900)
 
 if __name__ == "__main__":
-    # Ensure this points to a persistent volume path in Coolify
-    # If using Coolify Storage, use: "/app/data/grok_gqa_v9_best.pth"
-    
-    # 1. Check if model already exists to break the restart loop
-    if os.path.exists(MODEL_PATH):
-        logger.info(f"Existing model found at {MODEL_PATH}. Loading weights.")
-        
-        # Re-initialize the model structure
-        model = GrokGQA_Transformer(
-            input_dim=len(FEATURE_COLS),
-            seq_len=SEQ_LEN,
-            embed_dim=128,
-            num_layers=8,
-            num_q_heads=16,
-            num_kv_heads=4,
-            dropout=0.1
-        )
-        
-        try:
-            model.load_state_dict(torch.load(MODEL_PATH, map_location=torch.device('cpu')))
-            model.eval()
-            logger.info("Model loaded successfully.")
-        except Exception as e:
-            logger.error(f"Failed to load model: {e}. Falling back to training.")
-            model = train_model(epochs=40, batch_size=16, lr=3e-4, seq_len=SEQ_LEN, num_layers=8)
+    # Check if model already exists to break the restart training loop
+    if os.path.exists(MODEL_PATH) and os.path.exists(SCALER_PATH):
+        logger.info(f"Existing model and scaler found at {MODEL_PATH}. Skipping initialization training.")
     else:
-        logger.info("No model found. Starting initial training...")
-        model = train_model(epochs=40, batch_size=16, lr=3e-4, seq_len=SEQ_LEN, num_layers=8)
+        logger.info("Missing essential model components. Starting training lifecycle...")
+        train_model(epochs=40, batch_size=16, lr=3e-4, seq_len=SEQ_LEN, num_layers=8)
         logger.info("🎉 Initial training cycle complete.")
 
-    # 2. Transition to Trading Mode
-    # This keeps the container alive without triggering re-training
-    run_trading_mode(model)
+    # Transition to Live Mode
+    run_trading_mode()
