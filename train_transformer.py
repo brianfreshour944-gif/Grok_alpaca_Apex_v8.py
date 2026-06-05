@@ -21,7 +21,7 @@ from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import MarketOrderRequest
 from alpaca.trading.enums import OrderSide, TimeInForce
 
-# Assuming these imports exist in your project
+# Ensure these files exist in your /app directory
 from feature_engineering import add_features, FEATURE_COLS
 from ml_predictor import GrokGQA_Transformer, MLPredictor
 
@@ -38,6 +38,7 @@ MAX_HOLDINGS = {
 }
 COOLDOWN_SECONDS = 3600
 last_trade_times = {symbol: 0 for symbol in SYMBOLS}
+ORDER_AMOUNT = 11.0 # Minimum notional for Alpaca
 
 TIMEFRAME = TimeFrame.Hour
 SEQ_LEN = 32
@@ -51,19 +52,17 @@ PAPER = os.getenv("APCA_API_PAPER", "true").lower() == "true"
 data_client = CryptoHistoricalDataClient(api_key=API_KEY, secret_key=API_SECRET)
 trading_client = TradingClient(api_key=API_KEY, secret_key=API_SECRET, paper=PAPER)
 
-# --- Training Logic ---
-# (Ensure your FinancialTimeSeriesDataset and train_model functions are placed here)
+# --- Training / Logic Placeholders ---
+# Note: Ensure your 'FinancialTimeSeriesDataset' and 'train_model' 
+# functions are present in this file or imported correctly.
 
 async def nightly_refit_task():
-    """Background task that runs side-by-side with trading loop."""
     while True:
         try:
             now = datetime.now(timezone.utc)
             tomorrow = now + timedelta(days=1)
             next_midnight = datetime(tomorrow.year, tomorrow.month, tomorrow.day, 0, 0, 0, tzinfo=timezone.utc)
             seconds_until_midnight = (next_midnight - now).total_seconds()
-            
-            logger.info(f"📅 Nightly Re-fit engine sleeping for {seconds_until_midnight/3600:.2f} hours.")
             await asyncio.sleep(seconds_until_midnight)
             
             logger.info("⏰ Midnight reached. Initiating training...")
@@ -76,70 +75,3 @@ async def nightly_refit_task():
 def execute_trade_signal(symbol, prediction_prob, current_qty):
     BUY_THRESHOLD = 0.54
     SELL_THRESHOLD = 0.46
-    norm_symbol = symbol.replace("/", "")
-    
-    if time.time() - last_trade_times[symbol] < COOLDOWN_SECONDS:
-        return
-
-# Use 'notional' instead of 'qty' to ensure you meet the $10 minimum
-# You can set this to whatever dollar amount you are comfortable with (min $10)
-ORDER_AMOUNT = 11.0 
-
-# Inside execute_trade_signal, update the Buy block:
-if prediction_prob >= BUY_THRESHOLD and current_qty < MAX_HOLDINGS.get(symbol, 0):
-    logger.info(f"🔮 Bullish {symbol} ({prediction_prob:.2%}). Executing BUY.")
-    try:
-        trading_client.submit_order(MarketOrderRequest(
-            symbol=norm_symbol, 
-            notional=ORDER_AMOUNT,  # Use notional to avoid 'minimal amount' errors
-            side=OrderSide.BUY, 
-            time_in_force=TimeInForce.GTC
-        ))
-        last_trade_times[symbol] = time.time()
-    except Exception as e:
-        logger.error(f"Failed to place BUY for {symbol}: {e}")
-            
-    elif prediction_prob <= SELL_THRESHOLD and current_qty > 0:
-        logger.info(f"🔮 Bearish {symbol} ({prediction_prob:.2%}). Liquidating.")
-        try:
-            trading_client.submit_order(MarketOrderRequest(
-                symbol=norm_symbol, qty=current_qty, side=OrderSide.SELL, time_in_force=TimeInForce.GTC
-            ))
-            last_trade_times[symbol] = time.time()
-        except Exception as e:
-            logger.error(f"Failed to place SELL for {symbol}: {e}")
-
-async def run_trading_mode():
-    logger.info("Entering multi-asset live inference mode...")
-    predictor = MLPredictor(model_path=MODEL_PATH, seq_len=SEQ_LEN)
-    
-    while True:
-        for symbol in SYMBOLS:
-            try:
-                df = data_client.get_crypto_bars(CryptoBarsRequest(
-                    symbol_or_symbols=[symbol], timeframe=TIMEFRAME, 
-                    start=datetime.now(timezone.utc) - timedelta(days=3)
-                )).df.xs(symbol)
-                
-                prob = predictor.predict(df)
-                
-                try:
-                    pos = trading_client.get_open_position(symbol.replace("/", ""))
-                    current_qty = float(pos.qty)
-                except:
-                    current_qty = 0.0
-                
-                execute_trade_signal(symbol, prob, current_qty)
-            except Exception as e:
-                logger.error(f"Error processing {symbol}: {e}")
-        
-        await asyncio.sleep(900)
-
-async def main():
-    if not (os.path.exists(MODEL_PATH) and os.path.exists(SCALER_PATH)):
-        await asyncio.to_thread(train_model, epochs=15, batch_size=128, is_refit=False)
-
-    await asyncio.gather(run_trading_mode(), nightly_refit_task())
-
-if __name__ == "__main__":
-    asyncio.run(main())
