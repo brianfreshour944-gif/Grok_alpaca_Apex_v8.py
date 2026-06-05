@@ -49,12 +49,24 @@ def execute_trade_signal(symbol, prediction_prob, current_qty, df):
     SELL_THRESHOLD = 0.46
     if time.time() - last_trade_times[symbol] < COOLDOWN_SECONDS:
         return
-    if prediction_prob >= BUY_THRESHOLD and current_qty <= 0:
+    # 2. BUY Logic: Added "Pending" check
+    # If we just bought in the last 5 minutes, DO NOT buy again, 
+    # even if the position hasn't hit the API yet.
+    time_since_last_trade = time.time() - last_trade_times[symbol]
+    
+    if prediction_prob >= BUY_THRESHOLD and current_qty <= 0 and time_since_last_trade > 300: # 300s = 5 min
         logger.info(f"🔮 Bullish {symbol} ({prediction_prob:.2%}). Executing BUY.")
         try:
             trading_client.submit_order(MarketOrderRequest(
-                symbol=symbol, notional=ORDER_AMOUNT, side=OrderSide.BUY, time_in_force=TimeInForce.GTC
+                symbol=symbol, 
+                notional=ORDER_AMOUNT, 
+                side=OrderSide.BUY, 
+                time_in_force=TimeInForce.GTC
             ))
+            # Update the last_trade_times immediately
+            last_trade_times[symbol] = time.time()
+        except Exception as e:
+            logger.error(f"Failed to place BUY for {symbol}: {e}")
             last_trade_times[symbol] = time.time()
         except Exception as e:
             logger.error(f"Failed to place BUY for {symbol}: {e}")
