@@ -36,6 +36,8 @@ MAX_HOLDINGS = {
 }
 COOLDOWN_SECONDS = 3600
 last_trade_times = {symbol: 0 for symbol in SYMBOLS}
+# Tracks entry price for P/L calculation
+entry_prices = {symbol: 0.0 for symbol in SYMBOLS} 
 ORDER_AMOUNT = 11.0 
 
 TIMEFRAME = TimeFrame.Hour
@@ -60,19 +62,30 @@ def execute_trade_signal(symbol, prediction_prob, current_qty):
     if time.time() - last_trade_times[symbol] < COOLDOWN_SECONDS:
         return
 
+    # BUY Logic
     if prediction_prob >= BUY_THRESHOLD and current_qty < MAX_HOLDINGS.get(symbol, 0):
         logger.info(f"🔮 Bullish {symbol} ({prediction_prob:.2%}). Executing BUY.")
         try:
             trading_client.submit_order(MarketOrderRequest(
                 symbol=norm_symbol, notional=ORDER_AMOUNT, side=OrderSide.BUY, time_in_force=TimeInForce.GTC
             ))
+            # Record entry price
+            quote = data_client.get_latest_crypto_quote(norm_symbol)
+            entry_prices[symbol] = float(quote.ask_price)
             last_trade_times[symbol] = time.time()
         except Exception as e:
             logger.error(f"Failed to place BUY for {symbol}: {e}")
             
+    # SELL Logic
     elif prediction_prob <= SELL_THRESHOLD and current_qty > 0:
         logger.info(f"🔮 Bearish {symbol} ({prediction_prob:.2%}). Liquidating.")
         try:
+            # Calculate P/L before selling
+            exit_quote = data_client.get_latest_crypto_quote(norm_symbol)
+            exit_price = float(exit_quote.bid_price)
+            gain_loss = (exit_price - entry_prices[symbol]) * current_qty
+            logger.info(f"💰 Realized P/L for {symbol}: ${gain_loss:.2f} (Entry: {entry_prices[symbol]:.2f} -> Exit: {exit_price:.2f})")
+            
             trading_client.submit_order(MarketOrderRequest(
                 symbol=norm_symbol, qty=current_qty, side=OrderSide.SELL, time_in_force=TimeInForce.GTC
             ))
@@ -112,7 +125,6 @@ async def run_trading_mode():
 async def nightly_refit_task():
     while True:
         try:
-            # Simple 24h wait
             await asyncio.sleep(86400)
             logger.info("Initiating training...")
             # Note: Ensure train_model is defined in your imports
