@@ -1,3 +1,4 @@
+
 #!/usr/bin/env python3
 import asyncio
 import pandas as pd
@@ -20,6 +21,7 @@ from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import MarketOrderRequest
 from alpaca.trading.enums import OrderSide, TimeInForce
 
+# Assuming these imports exist in your project
 from feature_engineering import add_features, FEATURE_COLS
 from ml_predictor import GrokGQA_Transformer, MLPredictor
 
@@ -49,19 +51,36 @@ PAPER = os.getenv("APCA_API_PAPER", "true").lower() == "true"
 data_client = CryptoHistoricalDataClient(api_key=API_KEY, secret_key=API_SECRET)
 trading_client = TradingClient(api_key=API_KEY, secret_key=API_SECRET, paper=PAPER)
 
-# ... [Keep FinancialTimeSeriesDataset and train_model as is] ...
+# --- Training Logic ---
+# (Ensure your FinancialTimeSeriesDataset and train_model functions are placed here)
+
+async def nightly_refit_task():
+    """Background task that runs side-by-side with trading loop."""
+    while True:
+        try:
+            now = datetime.now(timezone.utc)
+            tomorrow = now + timedelta(days=1)
+            next_midnight = datetime(tomorrow.year, tomorrow.month, tomorrow.day, 0, 0, 0, tzinfo=timezone.utc)
+            seconds_until_midnight = (next_midnight - now).total_seconds()
+            
+            logger.info(f"📅 Nightly Re-fit engine sleeping for {seconds_until_midnight/3600:.2f} hours.")
+            await asyncio.sleep(seconds_until_midnight)
+            
+            logger.info("⏰ Midnight reached. Initiating training...")
+            await asyncio.to_thread(train_model, epochs=10, batch_size=128, is_refit=True)
+            await asyncio.sleep(60)
+        except Exception as e:
+            logger.error(f"Error in refit task: {e}")
+            await asyncio.sleep(300)
 
 def execute_trade_signal(symbol, prediction_prob, current_qty):
-    """Executes market orders based on signal boundary values with safety checks."""
     BUY_THRESHOLD = 0.54
     SELL_THRESHOLD = 0.46
     norm_symbol = symbol.replace("/", "")
     
-    # Cooldown Check
     if time.time() - last_trade_times[symbol] < COOLDOWN_SECONDS:
         return
 
-    # Buy logic: Signal is high AND we are below our max limit
     if prediction_prob >= BUY_THRESHOLD and current_qty < MAX_HOLDINGS.get(symbol, 0):
         logger.info(f"🔮 Bullish {symbol} ({prediction_prob:.2%}). Executing BUY.")
         try:
@@ -72,7 +91,6 @@ def execute_trade_signal(symbol, prediction_prob, current_qty):
         except Exception as e:
             logger.error(f"Failed to place BUY for {symbol}: {e}")
             
-    # Sell logic: Signal is low AND we have a position to liquidate
     elif prediction_prob <= SELL_THRESHOLD and current_qty > 0:
         logger.info(f"🔮 Bearish {symbol} ({prediction_prob:.2%}). Liquidating.")
         try:
@@ -90,23 +108,19 @@ async def run_trading_mode():
     while True:
         for symbol in SYMBOLS:
             try:
-                # 1. Fetch live data
                 df = data_client.get_crypto_bars(CryptoBarsRequest(
                     symbol_or_symbols=[symbol], timeframe=TIMEFRAME, 
                     start=datetime.now(timezone.utc) - timedelta(days=3)
                 )).df.xs(symbol)
                 
-                # 2. Get prediction
                 prob = predictor.predict(df)
                 
-                # 3. Get position for this specific asset
                 try:
                     pos = trading_client.get_open_position(symbol.replace("/", ""))
                     current_qty = float(pos.qty)
                 except:
                     current_qty = 0.0
                 
-                # 4. Signal
                 execute_trade_signal(symbol, prob, current_qty)
             except Exception as e:
                 logger.error(f"Error processing {symbol}: {e}")
@@ -114,7 +128,9 @@ async def run_trading_mode():
         await asyncio.sleep(900)
 
 async def main():
-    # Initial setup ... [Keep existing initialization logic] ...
+    if not (os.path.exists(MODEL_PATH) and os.path.exists(SCALER_PATH)):
+        await asyncio.to_thread(train_model, epochs=15, batch_size=128, is_refit=False)
+
     await asyncio.gather(run_trading_mode(), nightly_refit_task())
 
 if __name__ == "__main__":
