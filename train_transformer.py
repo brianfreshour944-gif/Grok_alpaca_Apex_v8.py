@@ -81,15 +81,23 @@ def execute_trade_signal(symbol, prediction_prob, current_qty):
     if time.time() - last_trade_times[symbol] < COOLDOWN_SECONDS:
         return
 
-    if prediction_prob >= BUY_THRESHOLD and current_qty < MAX_HOLDINGS.get(symbol, 0):
-        logger.info(f"🔮 Bullish {symbol} ({prediction_prob:.2%}). Executing BUY.")
-        try:
-            trading_client.submit_order(MarketOrderRequest(
-                symbol=norm_symbol, qty=0.001, side=OrderSide.BUY, time_in_force=TimeInForce.GTC
-            ))
-            last_trade_times[symbol] = time.time()
-        except Exception as e:
-            logger.error(f"Failed to place BUY for {symbol}: {e}")
+# Use 'notional' instead of 'qty' to ensure you meet the $10 minimum
+# You can set this to whatever dollar amount you are comfortable with (min $10)
+ORDER_AMOUNT = 11.0 
+
+# Inside execute_trade_signal, update the Buy block:
+if prediction_prob >= BUY_THRESHOLD and current_qty < MAX_HOLDINGS.get(symbol, 0):
+    logger.info(f"🔮 Bullish {symbol} ({prediction_prob:.2%}). Executing BUY.")
+    try:
+        trading_client.submit_order(MarketOrderRequest(
+            symbol=norm_symbol, 
+            notional=ORDER_AMOUNT,  # Use notional to avoid 'minimal amount' errors
+            side=OrderSide.BUY, 
+            time_in_force=TimeInForce.GTC
+        ))
+        last_trade_times[symbol] = time.time()
+    except Exception as e:
+        logger.error(f"Failed to place BUY for {symbol}: {e}")
             
     elif prediction_prob <= SELL_THRESHOLD and current_qty > 0:
         logger.info(f"🔮 Bearish {symbol} ({prediction_prob:.2%}). Liquidating.")
