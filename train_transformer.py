@@ -36,8 +36,7 @@ MAX_HOLDINGS = {
 }
 COOLDOWN_SECONDS = 3600
 last_trade_times = {symbol: 0 for symbol in SYMBOLS}
-# Tracks entry price for P/L calculation
-entry_prices = {symbol: 0.0 for symbol in SYMBOLS} 
+entry_prices = {symbol: 0.0 for symbol in SYMBOLS}
 ORDER_AMOUNT = 11.0 
 
 TIMEFRAME = TimeFrame.Hour
@@ -54,10 +53,11 @@ trading_client = TradingClient(api_key=API_KEY, secret_key=API_SECRET, paper=PAP
 
 # --- Logic Functions ---
 
-def execute_trade_signal(symbol, prediction_prob, current_qty):
+def execute_trade_signal(symbol, prediction_prob, current_qty, df):
     BUY_THRESHOLD = 0.54
     SELL_THRESHOLD = 0.46
     norm_symbol = symbol.replace("/", "")
+    latest_price = float(df['close'].iloc[-1])
     
     if time.time() - last_trade_times[symbol] < COOLDOWN_SECONDS:
         return
@@ -69,9 +69,7 @@ def execute_trade_signal(symbol, prediction_prob, current_qty):
             trading_client.submit_order(MarketOrderRequest(
                 symbol=norm_symbol, notional=ORDER_AMOUNT, side=OrderSide.BUY, time_in_force=TimeInForce.GTC
             ))
-            # Record entry price
-            quote = data_client.get_latest_crypto_quote(norm_symbol)
-            entry_prices[symbol] = float(quote.ask_price)
+            entry_prices[symbol] = latest_price
             last_trade_times[symbol] = time.time()
         except Exception as e:
             logger.error(f"Failed to place BUY for {symbol}: {e}")
@@ -80,11 +78,8 @@ def execute_trade_signal(symbol, prediction_prob, current_qty):
     elif prediction_prob <= SELL_THRESHOLD and current_qty > 0:
         logger.info(f"🔮 Bearish {symbol} ({prediction_prob:.2%}). Liquidating.")
         try:
-            # Calculate P/L before selling
-            exit_quote = data_client.get_latest_crypto_quote(norm_symbol)
-            exit_price = float(exit_quote.bid_price)
-            gain_loss = (exit_price - entry_prices[symbol]) * current_qty
-            logger.info(f"💰 Realized P/L for {symbol}: ${gain_loss:.2f} (Entry: {entry_prices[symbol]:.2f} -> Exit: {exit_price:.2f})")
+            gain_loss = (latest_price - entry_prices[symbol]) * current_qty
+            logger.info(f"💰 Realized P/L for {symbol}: ${gain_loss:.2f}")
             
             trading_client.submit_order(MarketOrderRequest(
                 symbol=norm_symbol, qty=current_qty, side=OrderSide.SELL, time_in_force=TimeInForce.GTC
@@ -114,7 +109,8 @@ async def run_trading_mode():
                     except:
                         current_qty = 0.0
                     
-                    execute_trade_signal(symbol, prob, current_qty)
+                    # Passing df now to avoid API issues
+                    execute_trade_signal(symbol, prob, current_qty, df)
                 except Exception as e:
                     logger.error(f"Error processing {symbol}: {e}")
         except Exception as loop_e:
@@ -125,9 +121,9 @@ async def run_trading_mode():
 async def nightly_refit_task():
     while True:
         try:
+            # Sleep 24 hours
             await asyncio.sleep(86400)
             logger.info("Initiating training...")
-            # Note: Ensure train_model is defined in your imports
             await asyncio.to_thread(train_model, epochs=10, is_refit=True)
         except Exception as e:
             logger.error(f"Error in refit: {e}")
