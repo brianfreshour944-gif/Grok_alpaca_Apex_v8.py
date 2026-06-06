@@ -4,9 +4,10 @@ import logging
 import os
 import time
 import json
-import psycopg2 
+import psycopg2
+import sys
 from datetime import datetime, timedelta, timezone
-from dotenv import load_dotenv 
+from dotenv import load_dotenv
 
 from alpaca.data.historical import CryptoHistoricalDataClient
 from alpaca.data.requests import CryptoBarsRequest
@@ -15,15 +16,32 @@ from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import MarketOrderRequest
 from alpaca.trading.enums import OrderSide, TimeInForce
 
+# Import your custom predictor
 from ml_predictor import MLPredictor
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)s | %(message)s')
 logger = logging.getLogger(__name__)
 
-# --- NEW: ERROR LOGGING HELPER ---
+# --- GLOBAL CONFIGURATION (Must be at the top level) ---
+BOT_NAME = os.getenv("BOT_NAME", "Bot_Alpha")
+SYMBOLS = ["BTC/USD", "ETH/USD", "LTC/USD", "DOGE/USD"]
+COOLDOWN_SECONDS = 3600
+ORDER_AMOUNT = 50.0
+TIMEFRAME = TimeFrame.Hour
+SEQ_LEN = 32
+MODEL_PATH = "/app/data/grok_gqa_v9_best.pth" if os.path.exists("/app/data") else "grok_gqa_v9_best.pth"
+STATE_FILE = "/app/data/trade_state.json"
+
+API_KEY = os.getenv("APCA_API_KEY_ID")
+API_SECRET = os.getenv("APCA_API_SECRET_KEY")
+PAPER = os.getenv("APCA_API_PAPER", "true").lower() == "true"
+
+data_client = CryptoHistoricalDataClient(api_key=API_KEY, secret_key=API_SECRET)
+trading_client = TradingClient(api_key=API_KEY, secret_key=API_SECRET, paper=PAPER)
+
+# --- TELEMETRY & ERROR LOGGING ---
 def log_error_to_db(bot_name, error_msg):
-    """Logs errors to the bot_errors table."""
     db_url = os.getenv('DATABASE_URL')
     if not db_url: return
     try:
@@ -37,9 +55,7 @@ def log_error_to_db(bot_name, error_msg):
     except Exception as e:
         logger.error(f"Critical failure logging error to DB: {e}")
 
-# --- Telemetry & Control Logic ---
 def check_status(bot_name):
-    """Updates heartbeat and checks for a 'STOP' command."""
     db_url = os.getenv('DATABASE_URL')
     try:
         with psycopg2.connect(db_url) as conn:
@@ -54,13 +70,13 @@ def check_status(bot_name):
                 result = cur.fetchone()
                 conn.commit()
                 if result and result[0] == 'STOP':
-                    logger.warning(f"🛑 Kill switch activated for {bot_name}. Shutting down.")
-                    exit(0)
+                    logger.warning(f"🛑 Kill switch activated for {bot_name}.")
+                    sys.exit(0)
     except Exception as e:
-        logger.error(f"Database heartbeat failed: {e}")
+        logger.error(f"Heartbeat failed: {e}")
         log_error_to_db(bot_name, f"Heartbeat failed: {e}")
 
-# --- Existing Helpers ---
+# --- TRADING HELPERS ---
 def sync_trade_to_db(bot_name, side, raw_price, raw_qty, symbol, order_id):
     try:
         price = float(raw_price) if raw_price is not None else 0.0
@@ -76,7 +92,7 @@ def sync_trade_to_db(bot_name, side, raw_price, raw_qty, symbol, order_id):
         logger.error(error_msg)
         log_error_to_db(bot_name, error_msg)
 
-# ... (load_trade_state, save_trade_state, get_current_qty, execute_trade_signal remain similar)
+# ... (Insert your load_trade_state, save_trade_state, get_current_qty, execute_trade_signal here) ...
 
 async def run_trading_mode(bot_name):
     predictor = MLPredictor(model_path=MODEL_PATH, seq_len=SEQ_LEN)
@@ -101,15 +117,10 @@ async def run_trading_mode(bot_name):
         await asyncio.sleep(900)
 
 if __name__ == "__main__":
-    # Define/Fetch variables here so they exist if the try-block crashes
-    bot_name = os.getenv('BOT_NAME', 'Bot_Alpha')
-    
     try:
-        # We define these here so they are in scope if run_trading_mode fails
-        asyncio.run(run_trading_mode(bot_name))
+        asyncio.run(run_trading_mode(BOT_NAME))
     except Exception as e:
         error_msg = f"FATAL SYSTEM CRASH: {e}"
         logger.critical(error_msg)
-        # Use a fallback name if the bot name wasn't set
-        log_error_to_db(bot_name, error_msg)
+        log_error_to_db(BOT_NAME, error_msg)
         sys.exit(1)
