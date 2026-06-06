@@ -17,15 +17,15 @@ from alpaca.trading.enums import OrderSide, TimeInForce
 
 from ml_predictor import MLPredictor
 
-load_dotenv() 
+load_dotenv()
 logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)s | %(message)s')
 logger = logging.getLogger(__name__)
 
-# --- Config & Database Sync ---
-BOT_NAME = os.getenv("BOT_NAME", "Bot_Alpha") 
+# --- Config ---
+BOT_NAME = os.getenv("BOT_NAME", "Bot_Alpha")
 SYMBOLS = ["BTC/USD", "ETH/USD", "LTC/USD", "DOGE/USD"]
 COOLDOWN_SECONDS = 3600
-ORDER_AMOUNT = 50.0 
+ORDER_AMOUNT = 50.0
 TIMEFRAME = TimeFrame.Hour
 SEQ_LEN = 32
 MODEL_PATH = "/app/data/grok_gqa_v9_best.pth" if os.path.exists("/app/data") else "grok_gqa_v9_best.pth"
@@ -38,21 +38,18 @@ PAPER = os.getenv("APCA_API_PAPER", "true").lower() == "true"
 data_client = CryptoHistoricalDataClient(api_key=API_KEY, secret_key=API_SECRET)
 trading_client = TradingClient(api_key=API_KEY, secret_key=API_SECRET, paper=PAPER)
 
-# Robust helper function to sync with Dashboard DB
+# Helper function
 def sync_trade_to_db(side, raw_price, raw_qty, symbol, order_id):
     try:
-        # Convert values safely
         price = float(raw_price) if raw_price is not None else 0.0
         qty = float(raw_qty) if raw_qty is not None else 0.0
-        order_id_str = str(order_id) # Convert UUID to string here
+        order_id_str = str(order_id)
         
         db_url = os.getenv('DATABASE_URL')
         conn = psycopg2.connect(db_url)
         cursor = conn.cursor()
-        
         query = "INSERT INTO trades (bot_name, exchange, symbol, side, price, quantity, value, order_id) VALUES (%s, %s, %s, %s, %s, %s, %s, %s);"
         cursor.execute(query, (BOT_NAME, 'Alpaca', symbol, side, price, qty, price * qty, order_id_str))
-        
         conn.commit()
         cursor.close()
         conn.close()
@@ -60,7 +57,6 @@ def sync_trade_to_db(side, raw_price, raw_qty, symbol, order_id):
     except Exception as e:
         logger.error(f"Database sync failed: {e}")
 
-# --- Existing Functions ---
 def load_trade_state():
     if os.path.exists(STATE_FILE):
         try:
@@ -85,20 +81,17 @@ def execute_trade_signal(symbol, prediction_prob, current_qty):
     
     if time.time() - last_trade_times.get(symbol, 0) < COOLDOWN_SECONDS: return
 
-    # BUY Logic
     if prediction_prob >= BUY_THRESHOLD and current_qty <= 0:
         logger.info(f"🔮 Bullish {symbol}. Attempting BUY.")
         try:
             order = trading_client.submit_order(MarketOrderRequest(
                 symbol=symbol, notional=ORDER_AMOUNT, side=OrderSide.BUY, time_in_force=TimeInForce.GTC
             ))
-            # Pass attributes directly; helper handles NoneType safely
             sync_trade_to_db('BUY', order.filled_avg_price, order.filled_qty, symbol, order.id)
             last_trade_times[symbol] = time.time()
             save_trade_state(last_trade_times)
         except Exception as e: logger.error(f"❌ BUY ERROR {symbol}: {str(e)}")
             
-    # SELL Logic
     elif prediction_prob <= SELL_THRESHOLD and current_qty > 0:
         logger.info(f"🔮 Bearish {symbol}. Liquidating.")
         try:
