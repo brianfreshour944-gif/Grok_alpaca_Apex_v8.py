@@ -4,9 +4,9 @@ import logging
 import os
 import time
 import json
-import psycopg2 # Added
+import psycopg2 
 from datetime import datetime, timedelta, timezone
-from dotenv import load_dotenv # Added
+from dotenv import load_dotenv 
 
 from alpaca.data.historical import CryptoHistoricalDataClient
 from alpaca.data.requests import CryptoBarsRequest
@@ -17,12 +17,12 @@ from alpaca.trading.enums import OrderSide, TimeInForce
 
 from ml_predictor import MLPredictor
 
-load_dotenv() # Load environment variables
+load_dotenv() 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)s | %(message)s')
 logger = logging.getLogger(__name__)
 
 # --- Config & Database Sync ---
-BOT_NAME = os.getenv("BOT_NAME", "Bot_Alpha") # Give each bot a unique name in Coolify
+BOT_NAME = os.getenv("BOT_NAME", "Bot_Alpha") 
 SYMBOLS = ["BTC/USD", "ETH/USD", "LTC/USD", "DOGE/USD"]
 COOLDOWN_SECONDS = 3600
 ORDER_AMOUNT = 50.0 
@@ -38,21 +38,26 @@ PAPER = os.getenv("APCA_API_PAPER", "true").lower() == "true"
 data_client = CryptoHistoricalDataClient(api_key=API_KEY, secret_key=API_SECRET)
 trading_client = TradingClient(api_key=API_KEY, secret_key=API_SECRET, paper=PAPER)
 
-# Helper function to sync with Dashboard DB
-def sync_trade_to_db(side, price, quantity, symbol, order_id):
+# Robust helper function to sync with Dashboard DB
+def sync_trade_to_db(side, raw_price, raw_qty, symbol, order_id):
     try:
+        # Convert to float safely, default to 0.0 if None
+        price = float(raw_price) if raw_price is not None else 0.0
+        qty = float(raw_qty) if raw_qty is not None else 0.0
+        
         db_url = os.getenv('DATABASE_URL')
         conn = psycopg2.connect(db_url)
         cursor = conn.cursor()
         query = "INSERT INTO trades (bot_name, exchange, symbol, side, price, quantity, value, order_id) VALUES (%s, %s, %s, %s, %s, %s, %s, %s);"
-        cursor.execute(query, (BOT_NAME, 'Alpaca', symbol, side, price, quantity, price * quantity, order_id))
+        cursor.execute(query, (BOT_NAME, 'Alpaca', symbol, side, price, qty, price * qty, order_id))
         conn.commit()
         cursor.close()
         conn.close()
+        logger.info(f"✅ Synced {symbol} trade to database.")
     except Exception as e:
         logger.error(f"Database sync failed: {e}")
 
-# --- Existing Functions (Load/Save/Get) ---
+# --- Existing Functions ---
 def load_trade_state():
     if os.path.exists(STATE_FILE):
         try:
@@ -84,8 +89,8 @@ def execute_trade_signal(symbol, prediction_prob, current_qty):
             order = trading_client.submit_order(MarketOrderRequest(
                 symbol=symbol, notional=ORDER_AMOUNT, side=OrderSide.BUY, time_in_force=TimeInForce.GTC
             ))
-            # Sync to Dashboard
-            sync_trade_to_db('BUY', float(order.filled_avg_price or 0), float(order.qty), symbol, order.id)
+            # Pass attributes directly; helper handles NoneType safely
+            sync_trade_to_db('BUY', order.filled_avg_price, order.filled_qty, symbol, order.id)
             last_trade_times[symbol] = time.time()
             save_trade_state(last_trade_times)
         except Exception as e: logger.error(f"❌ BUY ERROR {symbol}: {str(e)}")
@@ -97,8 +102,7 @@ def execute_trade_signal(symbol, prediction_prob, current_qty):
             order = trading_client.submit_order(MarketOrderRequest(
                 symbol=symbol, qty=str(current_qty), side=OrderSide.SELL, time_in_force=TimeInForce.GTC
             ))
-            # Sync to Dashboard
-            sync_trade_to_db('SELL', float(order.filled_avg_price or 0), float(order.qty), symbol, order.id)
+            sync_trade_to_db('SELL', order.filled_avg_price, order.filled_qty, symbol, order.id)
             last_trade_times[symbol] = time.time()
             save_trade_state(last_trade_times)
         except Exception as e: logger.error(f"❌ SELL ERROR {symbol}: {e}")
