@@ -101,13 +101,15 @@ async def run_trading_mode(bot_name):
         await asyncio.sleep(900)
 
 if __name__ == "__main__":
-    # Get the name safely from environment variables first
-    bot_name = os.getenv('BOT_NAME', 'Unnamed_Bot')
+    # Define/Fetch variables here so they exist if the try-block crashes
+    bot_name = os.getenv('BOT_NAME', 'Bot_Alpha')
+    
     try:
+        # We define these here so they are in scope if run_trading_mode fails
         asyncio.run(run_trading_mode(bot_name))
     except Exception as e:
         error_msg = f"FATAL SYSTEM CRASH: {e}"
         logger.critical(error_msg)
-        # Use the local variable 'bot_name' we defined above
+        # Use a fallback name if the bot name wasn't set
         log_error_to_db(bot_name, error_msg)
         sys.exit(1)
