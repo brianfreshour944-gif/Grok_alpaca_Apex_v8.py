@@ -41,15 +41,18 @@ trading_client = TradingClient(api_key=API_KEY, secret_key=API_SECRET, paper=PAP
 # Robust helper function to sync with Dashboard DB
 def sync_trade_to_db(side, raw_price, raw_qty, symbol, order_id):
     try:
-        # Convert to float safely, default to 0.0 if None
+        # Convert values safely
         price = float(raw_price) if raw_price is not None else 0.0
         qty = float(raw_qty) if raw_qty is not None else 0.0
+        order_id_str = str(order_id) # Convert UUID to string here
         
         db_url = os.getenv('DATABASE_URL')
         conn = psycopg2.connect(db_url)
         cursor = conn.cursor()
+        
         query = "INSERT INTO trades (bot_name, exchange, symbol, side, price, quantity, value, order_id) VALUES (%s, %s, %s, %s, %s, %s, %s, %s);"
-        cursor.execute(query, (BOT_NAME, 'Alpaca', symbol, side, price, qty, price * qty, order_id))
+        cursor.execute(query, (BOT_NAME, 'Alpaca', symbol, side, price, qty, price * qty, order_id_str))
+        
         conn.commit()
         cursor.close()
         conn.close()
