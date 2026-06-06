@@ -38,7 +38,38 @@ PAPER = os.getenv("APCA_API_PAPER", "true").lower() == "true"
 data_client = CryptoHistoricalDataClient(api_key=API_KEY, secret_key=API_SECRET)
 trading_client = TradingClient(api_key=API_KEY, secret_key=API_SECRET, paper=PAPER)
 
-# Helper function
+# --- NEW: Telemetry & Control Logic ---
+def check_status():
+    """Updates heartbeat and checks for a 'STOP' command in the database."""
+    db_url = os.getenv('DATABASE_URL')
+    try:
+        conn = psycopg2.connect(db_url)
+        cur = conn.cursor()
+        
+        # 1. Update Heartbeat (Upsert)
+        cur.execute("""
+            INSERT INTO bot_status (bot_name, last_update, status)
+            VALUES (%s, NOW(), 'RUNNING')
+            ON CONFLICT (bot_name) 
+            DO UPDATE SET last_update = NOW(), status = EXCLUDED.status;
+        """, (BOT_NAME,))
+        
+        # 2. Check for Kill Switch
+        cur.execute("SELECT status FROM bot_status WHERE bot_name = %s", (BOT_NAME,))
+        result = cur.fetchone()
+        
+        conn.commit()
+        cur.close()
+        conn.close()
+        
+        if result and result[0] == 'STOP':
+            logger.warning(f"🛑 Kill switch activated for {BOT_NAME}. Shutting down.")
+            exit(0) # Terminate the bot process
+            
+    except Exception as e:
+        logger.error(f"Database heartbeat failed: {e}")
+
+# --- Existing Helpers ---
 def sync_trade_to_db(side, raw_price, raw_qty, symbol, order_id):
     try:
         price = float(raw_price) if raw_price is not None else 0.0
@@ -106,6 +137,9 @@ def execute_trade_signal(symbol, prediction_prob, current_qty):
 async def run_trading_mode():
     predictor = MLPredictor(model_path=MODEL_PATH, seq_len=SEQ_LEN)
     while True:
+        # Check heartbeat and kill switch at the start of every cycle
+        check_status()
+        
         for symbol in SYMBOLS:
             try:
                 df = data_client.get_crypto_bars(CryptoBarsRequest(
