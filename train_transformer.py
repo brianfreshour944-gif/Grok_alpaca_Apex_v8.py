@@ -29,6 +29,7 @@ PAPER = os.getenv("APCA_API_PAPER", "true").lower() == "true"
 trading_client = TradingClient(api_key=API_KEY, secret_key=API_SECRET, paper=PAPER)
 
 # --- DATABASE HELPERS ---
+# --- DATABASE HELPERS ---
 def log_error_to_db(bot_name, error_msg):
     db_url = os.getenv('DATABASE_URL')
     if not db_url: return
@@ -54,14 +55,17 @@ def check_status(bot_name):
     except Exception as e:
         logger.error(f"Heartbeat failed: {e}")
 
-def sync_trade_to_db(bot_name, side, raw_price, raw_qty, symbol, order_id):
+def sync_trade_to_db(bot_name, side, raw_price, raw_qty, symbol, order_id, fee=0.0):
     try:
         price, qty = float(raw_price or 0.0), float(raw_qty or 0.0)
         db_url = os.getenv('DATABASE_URL')
         with psycopg2.connect(db_url) as conn:
             with conn.cursor() as cur:
-                cur.execute("INSERT INTO trades (bot_name, exchange, symbol, side, price, quantity, value, order_id) VALUES (%s, %s, %s, %s, %s, %s, %s, %s);", 
-                            (bot_name, 'Alpaca', symbol, side, price, qty, price * qty, str(order_id)))
+                cur.execute("""
+                    INSERT INTO trades 
+                    (bot_name, exchange, symbol, side, price, quantity, value, fee, order_id, timestamp) 
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW());
+                """, (bot_name, 'Alpaca', symbol, side, price, qty, price * qty, fee, str(order_id)))
                 conn.commit()
     except Exception as e:
         log_error_to_db(bot_name, f"Database sync failed: {e}")
@@ -75,7 +79,6 @@ def execute_trade_signal(bot_name, symbol, side, qty):
                 symbol=symbol, qty=qty, side=side, time_in_force=TimeInForce.GTC
             )
         )
-        # RECORD IN DB: Tag the order with the bot_name
         if db_url:
             with psycopg2.connect(db_url) as conn:
                 with conn.cursor() as cur:
@@ -109,9 +112,9 @@ async def run_trading_mode(bot_name):
                             if alpaca_order.status == 'filled':
                                 cur.execute("UPDATE bot_orders SET status = 'CLOSED' WHERE order_id = %s", (oid,))
                                 conn.commit()
-                                sync_trade_to_db(bot_name, alpaca_order.side.value, alpaca_order.filled_avg_price, alpaca_order.filled_qty, alpaca_order.symbol, oid)
-            
-            # ... (Your market analysis and execute_trade_signal calls go here)
+                                # ALPACA FEE: If your account has commission info, fetch it here. Otherwise use 0.0.
+                                fee = 0.0 
+                                sync_trade_to_db(bot_name, alpaca_order.side.value, alpaca_order.filled_avg_price, alpaca_order.filled_qty, alpaca_order.symbol, oid, fee)
             
         except Exception as e:
             log_error_to_db(bot_name, f"Loop error: {e}")
