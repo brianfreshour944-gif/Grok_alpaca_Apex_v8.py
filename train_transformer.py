@@ -1,4 +1,3 @@
-
 #!/usr/bin/env python3
 import asyncio
 import logging
@@ -8,6 +7,8 @@ import time
 import psycopg2
 import pandas as pd
 import numpy as np
+import torch
+import joblib
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
@@ -18,7 +19,8 @@ from alpaca.data.historical import CryptoHistoricalDataClient
 from alpaca.data.requests import CryptoBarsRequest
 from alpaca.data.timeframe import TimeFrame
 
-from ml_predictor import MLPredictor
+# Import the model architecture and feature engineering
+from ml_predictor import GrokGQA_Transformer, add_features, FEATURE_COLS
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)s | %(message)s')
@@ -152,7 +154,6 @@ async def get_clean_ohlcv_dataframe(symbol):
         logger.warning(f"Insufficient minute bars for {symbol}: {len(bars)} < {SEQUENCE_LEN}")
         return None
 
-    # Build DataFrame with explicit floats
     data = []
     for b in bars:
         data.append({
@@ -169,7 +170,6 @@ async def get_clean_ohlcv_dataframe(symbol):
     if df.index.tz is not None:
         df.index = df.index.tz_localize(None)
 
-    # Resample to 5 minutes
     ohlc_5 = df.resample('5min').agg({
         'open': 'first',
         'high': 'max',
@@ -178,7 +178,6 @@ async def get_clean_ohlcv_dataframe(symbol):
         'volume': 'sum'
     })
 
-    # Aggressive cleaning
     for col in ['open', 'high', 'low', 'close', 'volume']:
         ohlc_5[col] = pd.to_numeric(ohlc_5[col], errors='coerce').fillna(0.0)
         ohlc_5[col] = ohlc_5[col].replace([np.inf, -np.inf], 0.0)
@@ -191,33 +190,74 @@ async def get_clean_ohlcv_dataframe(symbol):
     ohlc_5 = ohlc_5.iloc[-SEQUENCE_LEN:]
     return ohlc_5.astype(float)
 
+# --- Safe Predictor that sanitizes after each step ---
+class SafeMLPredictor:
+    def __init__(self, model_path, seq_len=32):
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.seq_len = seq_len
+        if not os.path.exists(model_path):
+            raise FileNotFoundError(f"Model file not found at {model_path}")
+        self.input_dim = len(FEATURE_COLS)  # should be 11
+        self.model = GrokGQA_Transformer(
+            input_dim=self.input_dim, seq_len=seq_len,
+            embed_dim=128, num_layers=8, num_q_heads=16, num_kv_heads=4, dropout=0.1
+        ).to(self.device)
+        state = torch.load(model_path, map_location=self.device)
+        self.model.load_state_dict(state, strict=False)
+        self.model.eval()
+        logger.info(f"✅ Model weights loaded from {model_path}")
+        scaler_path = os.path.join(os.path.dirname(model_path), 'feature_scaler.pkl')
+        if os.path.exists(scaler_path):
+            self.scaler = joblib.load(scaler_path)
+            logger.info(f"✅ Scaler loaded from {scaler_path}")
+        else:
+            self.scaler = None
+            logger.warning("No scaler found; predictions will be unnormalized")
+
+    def predict(self, df: pd.DataFrame) -> float:
+        try:
+            # Step 1: sanitize input
+            df = df.copy()
+            required = ['open', 'high', 'low', 'close', 'volume']
+            for col in required:
+                if col not in df.columns:
+                    df[col] = 0.0
+                df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0)
+            df = df.map(lambda x: 0.0 if x is None else x)
+
+            # Step 2: add features
+            df_features = add_features(df)
+            # Step 3: sanitize features
+            for col in FEATURE_COLS:
+                if col not in df_features.columns:
+                    df_features[col] = 0.0
+                else:
+                    df_features[col] = pd.to_numeric(df_features[col], errors='coerce').fillna(0.0)
+            df_features = df_features.map(lambda x: 0.0 if x is None else x)
+
+            # Step 4: extract sequence
+            data = df_features[FEATURE_COLS].tail(self.seq_len).values.astype(np.float32)
+            if len(data) < self.seq_len:
+                logger.warning(f"Insufficient rows after feature engineering: {len(data)}")
+                return 0.5
+
+            # Step 5: scale
+            if self.scaler is not None:
+                data = self.scaler.transform(data).astype(np.float32)
+
+            # Step 6: predict
+            x = torch.tensor(data).unsqueeze(0).to(self.device)
+            with torch.no_grad():
+                pred = self.model(x).item()
+            return float(pred)
+        except Exception as e:
+            logger.error(f"Prediction error in SafeMLPredictor: {e}")
+            return 0.5
+
 async def run_trading_mode(bot_name):
     global cooldown_until, positions
-    predictor = MLPredictor(model_path=MODEL_PATH, seq_len=SEQUENCE_LEN)
-
-    # ---- Monkey-patch the predict method to sanitize the DataFrame ----
-    original_predict = predictor.predict
-
-    def sanitized_predict(df):
-        # Ultimate sanitisation: convert every value to float, replace None/NaN/inf with 0.0
-        df_clean = df.copy()
-        # Force all columns to numeric, coercing errors to NaN, then fill with 0.0
-        for col in df_clean.columns:
-            df_clean[col] = pd.to_numeric(df_clean[col], errors='coerce').fillna(0.0)
-        # Replace any remaining None (should not happen) with 0.0
-        df_clean = df_clean.map(lambda x: 0.0 if x is None else x)
-        # Ensure float type
-        df_clean = df_clean.astype(float)
-        try:
-            return original_predict(df_clean)
-        except Exception as e:
-            logger.error(f"Prediction error after sanitization: {e}")
-            return 0.5  # neutral signal
-
-    predictor.predict = sanitized_predict
-    # ----------------------------------------------------------------
-
-    logger.info("MLPredictor loaded and patched. Starting trading loop...")
+    predictor = SafeMLPredictor(model_path=MODEL_PATH, seq_len=SEQUENCE_LEN)
+    logger.info("SafeMLPredictor loaded. Starting trading loop...")
 
     while True:
         try:
