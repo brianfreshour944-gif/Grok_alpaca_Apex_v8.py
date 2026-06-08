@@ -7,7 +7,6 @@ import time
 import psycopg2
 import pandas as pd
 import numpy as np
-import torch
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
@@ -19,6 +18,8 @@ from alpaca.data.requests import CryptoBarsRequest
 from alpaca.data.timeframe import TimeFrame
 
 from ml_predictor import MLPredictor
+# Import feature engineering (to ensure it's available, though predictor uses it internally)
+from feature_engineering import add_features, FEATURE_COLS
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)s | %(message)s')
@@ -27,9 +28,9 @@ logger = logging.getLogger(__name__)
 # --- GLOBAL CONFIGURATION ---
 BOT_NAME = os.getenv("BOT_NAME", "Grok_Alpaca_Apex_v8")
 SYMBOLS = ["BTC/USD", "ETH/USD", "LTC/USD", "DOGE/USD"]
-ORDER_AMOUNT = 50.0
+ORDER_AMOUNT = 50.0          # USD per trade
 MODEL_PATH = "/app/data/grok_gqa_v9_best.pth" if os.path.exists("/app/data") else "grok_gqa_v9_best.pth"
-SEQUENCE_LEN = 32
+SEQUENCE_LEN = 32            # must match the model's seq_len
 
 API_KEY = os.getenv("APCA_API_KEY_ID")
 API_SECRET = os.getenv("APCA_API_SECRET_KEY")
@@ -38,10 +39,11 @@ PAPER = os.getenv("APCA_API_PAPER", "true").lower() == "true"
 trading_client = TradingClient(api_key=API_KEY, secret_key=API_SECRET, paper=PAPER)
 data_client = CryptoHistoricalDataClient()
 
+# Position tracking (in‑memory)
 positions = {symbol: False for symbol in SYMBOLS}
 cooldown_until = 0.0
 
-# --- DATABASE HELPERS (unchanged from before) ---
+# --- DATABASE HELPERS (unchanged) ---
 def log_error_to_db(bot_name, error_msg):
     db_url = os.getenv('DATABASE_URL')
     if not db_url: return
@@ -136,8 +138,11 @@ async def sync_filled_orders(bot_name):
                 except Exception as e:
                     logger.error(f"Error syncing order {oid}: {e}")
 
-async def get_features_for_symbol(symbol):
-    """Fetch 5‑minute bars, return a pandas DataFrame (scaled) with columns: close, high, low, volume."""
+async def get_ohlcv_dataframe(symbol):
+    """
+    Fetch enough minute bars (last 6 hours) and return a DataFrame with columns:
+    ['open','high','low','close','volume'] and a datetime index.
+    """
     end = datetime.now()
     start = end - timedelta(hours=6)
     request = CryptoBarsRequest(
@@ -145,28 +150,33 @@ async def get_features_for_symbol(symbol):
         timeframe=TimeFrame.Minute,
         start=start,
         end=end,
-        limit=200
+        limit=500
     )
     bars = data_client.get_crypto_bars(request).data.get(symbol, [])
     if len(bars) < SEQUENCE_LEN:
-        logger.warning(f"Insufficient minute bars for {symbol}: {len(bars)}")
+        logger.warning(f"Insufficient minute bars for {symbol}: {len(bars)} < {SEQUENCE_LEN}")
         return None
 
+    # Build DataFrame with all OHLCV fields
     df = pd.DataFrame([{
         'timestamp': b.timestamp,
-        'close': float(b.close),
+        'open': float(b.open),
         'high': float(b.high),
         'low': float(b.low),
+        'close': float(b.close),
         'volume': float(b.volume)
     } for b in bars])
     df.sort_values('timestamp', inplace=True)
     df.set_index('timestamp', inplace=True)
     if df.index.tz is not None:
         df.index = df.index.tz_localize(None)
+
+    # Resample to 5‑minute bars (the training frequency)
     ohlc_5 = df.resample('5min').agg({
-        'close': 'last',
+        'open': 'first',
         'high': 'max',
         'low': 'min',
+        'close': 'last',
         'volume': 'sum'
     }).dropna()
 
@@ -174,19 +184,13 @@ async def get_features_for_symbol(symbol):
         logger.warning(f"Not enough 5‑min bars for {symbol}: {len(ohlc_5)}")
         return None
 
-    # Take last SEQUENCE_LEN rows
-    features_df = ohlc_5[['close', 'high', 'low', 'volume']].iloc[-SEQUENCE_LEN:].copy()
-    return features_df
+    # Keep only the last SEQUENCE_LEN rows (model expects exactly that length for feature engineering)
+    ohlc_5 = ohlc_5.iloc[-SEQUENCE_LEN:]
+    return ohlc_5
 
 async def run_trading_mode(bot_name):
     global cooldown_until, positions
     predictor = MLPredictor(model_path=MODEL_PATH, seq_len=SEQUENCE_LEN)
-
-    # Try to access the scaler from the predictor (it was printed as loaded)
-    scaler = getattr(predictor, 'scaler', None)
-    if scaler is None:
-        logger.warning("Scaler not found in predictor; will use raw features (may cause prediction errors)")
-
     logger.info("MLPredictor loaded. Starting trading loop...")
 
     while True:
@@ -204,70 +208,46 @@ async def run_trading_mode(bot_name):
                     logger.debug(f"Already in position for {symbol}, skipping")
                     continue
 
-                features_df = await get_features_for_symbol(symbol)
-                if features_df is None:
+                df = await get_ohlcv_dataframe(symbol)
+                if df is None:
                     continue
 
-                # Scale features if scaler is available
-                if scaler is not None:
-                    try:
-                        scaled_values = scaler.transform(features_df.values)
-                        features_df = pd.DataFrame(scaled_values, columns=features_df.columns, index=features_df.index)
-                    except Exception as e:
-                        logger.error(f"Scaling failed for {symbol}: {e}")
-                        continue
-
-                # --- Try different prediction formats based on the predictor's likely requirements ---
-                signal = None
+                # Let the predictor do feature engineering and scaling internally
                 try:
-                    # Attempt 1: pass DataFrame (most likely)
-                    signal = predictor.predict(features_df)
-                except AttributeError as e:
-                    logger.debug(f"predict() failed, trying __call__: {e}")
-                    try:
-                        signal = predictor(features_df)
-                    except Exception as e2:
-                        logger.debug(f"__call__ failed: {e2}")
+                    signal = predictor.predict(df)   # returns a float between 0 and 1
                 except Exception as e:
-                    logger.debug(f"DataFrame predict failed: {e}")
+                    logger.error(f"Prediction error for {symbol}: {e}")
+                    continue
 
-                if signal is None:
-                    # Attempt 2: pass numpy array
+                # Threshold from the predictor's docstring (>0.51 buy, <0.49 sell)
+                if signal > 0.51:
+                    current_price = df['close'].iloc[-1]
+                    qty = ORDER_AMOUNT / current_price
+                    order = execute_trade(bot_name, symbol, OrderSide.BUY, qty)
+                    if order:
+                        positions[symbol] = True
+                        cooldown_until = time.time() + 300   # 5 min cooldown
+                        logger.info(f"🎯 BUY signal for {symbol} at {current_price:.2f} (prob={signal:.3f})")
+                elif signal < 0.49 and positions.get(symbol, False):
+                    # Optional: implement automatic sell based on bearish signal
                     try:
-                        signal = predictor.predict(features_df.values)
-                    except Exception as e:
-                        logger.debug(f"Numpy predict failed: {e}")
-                        # Attempt 3: pass torch tensor
-                        try:
-                            tensor = torch.tensor(features_df.values, dtype=torch.float32).unsqueeze(0)
-                            signal = predictor.predict(tensor)
-                        except Exception as e3:
-                            logger.error(f"All prediction attempts failed for {symbol}: {e3}")
-                            continue
-
-                # Interpret signal (adjust based on your model's output)
-                if signal is not None:
-                    # If signal is a probability, use threshold 0.5
-                    if hasattr(signal, 'item'):
-                        signal = signal.item()
-                    if isinstance(signal, (np.ndarray, torch.Tensor)):
-                        signal = signal[0] if len(signal) > 0 else 0
-                    if signal > 0.5:   # binary classification threshold
-                        current_price = features_df['close'].iloc[-1]
-                        qty = ORDER_AMOUNT / current_price
-                        order = execute_trade(bot_name, symbol, OrderSide.BUY, qty)
-                        if order:
-                            positions[symbol] = True
-                            cooldown_until = time.time() + 300
-                            logger.info(f"🎯 BUY signal for {symbol} at {current_price:.2f} (signal={signal:.3f})")
-                    else:
-                        logger.debug(f"No buy signal for {symbol} (signal={signal:.3f})")
+                        position = trading_client.get_position(symbol)
+                        qty = float(position.qty)
+                        if qty > 0:
+                            order = execute_trade(bot_name, symbol, OrderSide.SELL, qty)
+                            if order:
+                                positions[symbol] = False
+                                cooldown_until = time.time() + 300
+                                logger.info(f"🔻 SELL signal for {symbol} at {df['close'].iloc[-1]:.2f} (prob={signal:.3f})")
+                    except Exception:
+                        # No position, just reset flag
+                        positions[symbol] = False
                 else:
-                    logger.warning(f"Could not obtain prediction for {symbol}")
+                    logger.debug(f"No trade for {symbol} (signal={signal:.3f})")
 
-                await asyncio.sleep(2)   # delay between symbols
+                await asyncio.sleep(2)   # small delay between symbols
 
-            await asyncio.sleep(300)   # 5 minutes between full scans
+            await asyncio.sleep(300)   # scan every 5 minutes
 
         except Exception as e:
             error_msg = f"Main loop error: {e}"
