@@ -18,8 +18,6 @@ from alpaca.data.requests import CryptoBarsRequest
 from alpaca.data.timeframe import TimeFrame
 
 from ml_predictor import MLPredictor
-# Import feature engineering (to ensure it's available, though predictor uses it internally)
-from feature_engineering import add_features, FEATURE_COLS
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)s | %(message)s')
@@ -28,9 +26,9 @@ logger = logging.getLogger(__name__)
 # --- GLOBAL CONFIGURATION ---
 BOT_NAME = os.getenv("BOT_NAME", "Grok_Alpaca_Apex_v8")
 SYMBOLS = ["BTC/USD", "ETH/USD", "LTC/USD", "DOGE/USD"]
-ORDER_AMOUNT = 50.0          # USD per trade
+ORDER_AMOUNT = 50.0
 MODEL_PATH = "/app/data/grok_gqa_v9_best.pth" if os.path.exists("/app/data") else "grok_gqa_v9_best.pth"
-SEQUENCE_LEN = 32            # must match the model's seq_len
+SEQUENCE_LEN = 32
 
 API_KEY = os.getenv("APCA_API_KEY_ID")
 API_SECRET = os.getenv("APCA_API_SECRET_KEY")
@@ -39,11 +37,10 @@ PAPER = os.getenv("APCA_API_PAPER", "true").lower() == "true"
 trading_client = TradingClient(api_key=API_KEY, secret_key=API_SECRET, paper=PAPER)
 data_client = CryptoHistoricalDataClient()
 
-# Position tracking (in‑memory)
 positions = {symbol: False for symbol in SYMBOLS}
 cooldown_until = 0.0
 
-# --- DATABASE HELPERS (unchanged) ---
+# ---------- DATABASE HELPERS (unchanged) ----------
 def log_error_to_db(bot_name, error_msg):
     db_url = os.getenv('DATABASE_URL')
     if not db_url: return
@@ -138,10 +135,10 @@ async def sync_filled_orders(bot_name):
                 except Exception as e:
                     logger.error(f"Error syncing order {oid}: {e}")
 
-async def get_ohlcv_dataframe(symbol):
+async def get_clean_ohlcv_dataframe(symbol):
     """
-    Fetch enough minute bars (last 6 hours) and return a DataFrame with columns:
-    ['open','high','low','close','volume'] and a datetime index.
+    Fetch minute bars, resample to 5min, and return a DataFrame with columns
+    ['open','high','low','close','volume'] that contains no None or NaN.
     """
     end = datetime.now()
     start = end - timedelta(hours=6)
@@ -157,35 +154,53 @@ async def get_ohlcv_dataframe(symbol):
         logger.warning(f"Insufficient minute bars for {symbol}: {len(bars)} < {SEQUENCE_LEN}")
         return None
 
-    # Build DataFrame with all OHLCV fields
-    df = pd.DataFrame([{
-        'timestamp': b.timestamp,
-        'open': float(b.open),
-        'high': float(b.high),
-        'low': float(b.low),
-        'close': float(b.close),
-        'volume': float(b.volume)
-    } for b in bars])
+    # Build DataFrame and convert None to nan
+    data = []
+    for b in bars:
+        # Ensure each field is a float; if None, use nan
+        data.append({
+            'timestamp': b.timestamp,
+            'open': float(b.open) if b.open is not None else np.nan,
+            'high': float(b.high) if b.high is not None else np.nan,
+            'low': float(b.low) if b.low is not None else np.nan,
+            'close': float(b.close) if b.close is not None else np.nan,
+            'volume': float(b.volume) if b.volume is not None else np.nan,
+        })
+    df = pd.DataFrame(data)
     df.sort_values('timestamp', inplace=True)
     df.set_index('timestamp', inplace=True)
     if df.index.tz is not None:
         df.index = df.index.tz_localize(None)
 
-    # Resample to 5‑minute bars (the training frequency)
+    # Resample to 5 minutes
     ohlc_5 = df.resample('5min').agg({
         'open': 'first',
         'high': 'max',
         'low': 'min',
         'close': 'last',
         'volume': 'sum'
-    }).dropna()
+    })
+
+    # Fill missing values: forward fill prices, volume fill with 0
+    ohlc_5 = ohlc_5.fillna(method='ffill')
+    ohlc_5['volume'] = ohlc_5['volume'].fillna(0.0)
+
+    # Drop any rows that still have NaN (should not happen after ffill)
+    ohlc_5.dropna(inplace=True)
 
     if len(ohlc_5) < SEQUENCE_LEN:
-        logger.warning(f"Not enough 5‑min bars for {symbol}: {len(ohlc_5)}")
+        logger.warning(f"Not enough clean 5‑min bars for {symbol}: {len(ohlc_5)}")
         return None
 
-    # Keep only the last SEQUENCE_LEN rows (model expects exactly that length for feature engineering)
+    # Keep only the last SEQUENCE_LEN rows
     ohlc_5 = ohlc_5.iloc[-SEQUENCE_LEN:]
+
+    # Double‑check no None remains
+    for col in ['open','high','low','close','volume']:
+        if ohlc_5[col].isnull().any():
+            logger.warning(f"Still NaN in {col} for {symbol}, filling with 0")
+            ohlc_5[col] = ohlc_5[col].fillna(0.0)
+
     return ohlc_5
 
 async def run_trading_mode(bot_name):
@@ -208,28 +223,28 @@ async def run_trading_mode(bot_name):
                     logger.debug(f"Already in position for {symbol}, skipping")
                     continue
 
-                df = await get_ohlcv_dataframe(symbol)
+                df = await get_clean_ohlcv_dataframe(symbol)
                 if df is None:
                     continue
 
-                # Let the predictor do feature engineering and scaling internally
+                # Predict using the cleaned DataFrame
                 try:
-                    signal = predictor.predict(df)   # returns a float between 0 and 1
+                    signal = predictor.predict(df)   # returns float 0-1
                 except Exception as e:
                     logger.error(f"Prediction error for {symbol}: {e}")
                     continue
 
-                # Threshold from the predictor's docstring (>0.51 buy, <0.49 sell)
+                # Use thresholds from MLPredictor docstring
                 if signal > 0.51:
                     current_price = df['close'].iloc[-1]
                     qty = ORDER_AMOUNT / current_price
                     order = execute_trade(bot_name, symbol, OrderSide.BUY, qty)
                     if order:
                         positions[symbol] = True
-                        cooldown_until = time.time() + 300   # 5 min cooldown
+                        cooldown_until = time.time() + 300
                         logger.info(f"🎯 BUY signal for {symbol} at {current_price:.2f} (prob={signal:.3f})")
                 elif signal < 0.49 and positions.get(symbol, False):
-                    # Optional: implement automatic sell based on bearish signal
+                    # Optional auto‑sell on bearish signal
                     try:
                         position = trading_client.get_position(symbol)
                         qty = float(position.qty)
@@ -240,7 +255,6 @@ async def run_trading_mode(bot_name):
                                 cooldown_until = time.time() + 300
                                 logger.info(f"🔻 SELL signal for {symbol} at {df['close'].iloc[-1]:.2f} (prob={signal:.3f})")
                     except Exception:
-                        # No position, just reset flag
                         positions[symbol] = False
                 else:
                     logger.debug(f"No trade for {symbol} (signal={signal:.3f})")
