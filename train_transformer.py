@@ -136,10 +136,7 @@ async def sync_filled_orders(bot_name):
                     logger.error(f"Error syncing order {oid}: {e}")
 
 async def get_clean_ohlcv_dataframe(symbol):
-    """
-    Fetch minute bars, resample to 5min, return DataFrame with NO None, NaN, or inf.
-    Every cell is a Python float.
-    """
+    """Return a 5‑minute OHLCV DataFrame with NO None, NaN, or inf."""
     end = datetime.now()
     start = end - timedelta(hours=6)
     request = CryptoBarsRequest(
@@ -154,7 +151,7 @@ async def get_clean_ohlcv_dataframe(symbol):
         logger.warning(f"Insufficient minute bars for {symbol}: {len(bars)} < {SEQUENCE_LEN}")
         return None
 
-    # Build DataFrame with explicit float conversion, None -> 0.0
+    # Build DataFrame with explicit floats
     data = []
     for b in bars:
         data.append({
@@ -180,12 +177,13 @@ async def get_clean_ohlcv_dataframe(symbol):
         'volume': 'sum'
     })
 
-    # Aggressive cleaning: convert each column to float, fill NaN with 0.0, replace inf with 0.0
+    # AGGRESSIVE CLEAN: convert all to float, fill NaN with 0.0, replace inf
     for col in ['open', 'high', 'low', 'close', 'volume']:
-        ohlc_5[col] = ohlc_5[col].astype(float).fillna(0.0).replace([np.inf, -np.inf], 0.0)
+        ohlc_5[col] = pd.to_numeric(ohlc_5[col], errors='coerce').fillna(0.0)
+        ohlc_5[col] = ohlc_5[col].replace([np.inf, -np.inf], 0.0)
 
-    # Additional brute force: replace any remaining None (should be none) with 0.0
-    ohlc_5 = ohlc_5.applymap(lambda x: 0.0 if x is None else x)
+    # Replace any lingering None (should be none after to_numeric)
+    ohlc_5 = ohlc_5.map(lambda x: 0.0 if x is None else x)
 
     if len(ohlc_5) < SEQUENCE_LEN:
         logger.warning(f"Not enough clean 5‑min bars for {symbol}: {len(ohlc_5)}")
@@ -194,9 +192,24 @@ async def get_clean_ohlcv_dataframe(symbol):
     # Keep only the last SEQUENCE_LEN rows
     ohlc_5 = ohlc_5.iloc[-SEQUENCE_LEN:]
 
-    # Final sanity: convert all values to float again
+    # Final sanity: all values must be float
     ohlc_5 = ohlc_5.astype(float)
     return ohlc_5
+
+def safe_predict(predictor, df):
+    """Wraps predictor.predict with aggressive cleaning and error recovery."""
+    # Ultimate cleaning: convert entire DataFrame to float, None/NaN to 0.0
+    df_clean = df.copy()
+    for col in df_clean.columns:
+        df_clean[col] = pd.to_numeric(df_clean[col], errors='coerce').fillna(0.0)
+    df_clean = df_clean.map(lambda x: 0.0 if x is None else x)
+    df_clean = df_clean.astype(float)
+    try:
+        return predictor.predict(df_clean)
+    except Exception as e:
+        logger.error(f"Prediction failed even after cleaning: {e}")
+        # Last resort: return neutral signal
+        return 0.5
 
 async def run_trading_mode(bot_name):
     global cooldown_until, positions
@@ -222,16 +235,7 @@ async def run_trading_mode(bot_name):
                 if df is None:
                     continue
 
-                # Optional: log a sample to verify no None
-                # logger.debug(f"DataFrame for {symbol}:\n{df.head().to_string()}")
-
-                try:
-                    signal = predictor.predict(df)
-                except Exception as e:
-                    logger.error(f"Prediction error for {symbol}: {e}")
-                    # Optionally, log the DataFrame to debug
-                    # logger.error(f"DataFrame info:\n{df.info()}")
-                    continue
+                signal = safe_predict(predictor, df)
 
                 if signal > 0.51:
                     current_price = df['close'].iloc[-1]
@@ -258,7 +262,7 @@ async def run_trading_mode(bot_name):
 
                 await asyncio.sleep(2)
 
-            await asyncio.sleep(300)  # scan every 5 minutes
+            await asyncio.sleep(300)
 
         except Exception as e:
             error_msg = f"Main loop error: {e}"
