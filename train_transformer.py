@@ -158,6 +158,7 @@ def register_order_in_db(bot_name, order_id, symbol, side, price):
                 cur.execute("""
                     INSERT INTO bot_orders (order_id, bot_name, symbol, side, price, status)
                     VALUES (%s, %s, %s, %s, %s, 'OPEN')
+                    ON CONFLICT (order_id) DO NOTHING
                 """, (str(order_id), bot_name, symbol, side, float(price)))
                 conn.commit()
     except Exception as e:
@@ -170,9 +171,15 @@ def execute_trade(bot_name, symbol, side, qty):
                 symbol=symbol, qty=qty, side=side, time_in_force=TimeInForce.GTC
             )
         )
-        register_order_in_db(bot_name, order.id, symbol, side.value, 0.0)
-        logger.info(f"✅ Placed {side.value} order for {symbol} | Qty: {qty:.6f} | Order ID: {order.id}")
-        return order
+        # Verify the order actually exists on Alpaca side
+        try:
+            trading_client.get_order_by_id(order.id)
+            register_order_in_db(bot_name, order.id, symbol, side.value, 0.0)
+            logger.info(f"✅ Placed {side.value} order for {symbol} | Qty: {qty:.6f} | Order ID: {order.id}")
+            return order
+        except Exception as verify_err:
+            logger.error(f"Order {order.id} not confirmed by Alpaca after placement: {verify_err}")
+            return None
     except Exception as e:
         log_error_to_db(bot_name, f"Trade execution failed for {symbol}: {e}")
         return None
