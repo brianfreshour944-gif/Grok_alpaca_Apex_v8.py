@@ -19,8 +19,8 @@ from alpaca.data.historical import CryptoHistoricalDataClient
 from alpaca.data.requests import CryptoBarsRequest
 from alpaca.data.timeframe import TimeFrame
 
-# Import the model architecture and feature engineering
-from ml_predictor import GrokGQA_Transformer, add_features, FEATURE_COLS
+# Import only the model architecture and constants, not the buggy add_features
+from ml_predictor import GrokGQA_Transformer, FEATURE_COLS
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)s | %(message)s')
@@ -43,7 +43,71 @@ data_client = CryptoHistoricalDataClient()
 positions = {symbol: False for symbol in SYMBOLS}
 cooldown_until = 0.0
 
-# ---------- DATABASE HELPERS ----------
+# ---------- SAFE FEATURE ENGINEERING (replaces buggy version) ----------
+def safe_add_features(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Calculate all 11 features exactly as the model expects, but with aggressive
+    None → NaN → 0.0 conversion at every step. Guarantees no None remains.
+    """
+    # Step 1: ensure we have all required columns and convert None to NaN
+    required = ['open', 'high', 'low', 'close', 'volume']
+    for col in required:
+        if col not in df.columns:
+            df[col] = 0.0
+        # Convert any None to NaN, then to float, fill NaN with 0.0
+        df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0)
+    df = df.copy()
+
+    # Step 2: calculate returns
+    df['returns'] = df['close'].pct_change().fillna(0.0)
+
+    # Step 3: vol_14 (rolling std of returns)
+    df['vol_14'] = df['returns'].rolling(window=14).std().fillna(0.0)
+
+    # Step 4: RSI (14)
+    delta = df['close'].diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.rolling(window=14).mean()
+    avg_loss = loss.rolling(window=14).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)  # avoid division by zero
+    rsi = 100 - (100 / (1 + rs))
+    df['rsi'] = rsi.fillna(50.0).replace([np.inf, -np.inf], 50.0)
+
+    # Step 5: MACD (12,26,9)
+    exp1 = df['close'].ewm(span=12, adjust=False).mean()
+    exp2 = df['close'].ewm(span=26, adjust=False).mean()
+    macd_line = exp1 - exp2
+    signal_line = macd_line.ewm(span=9, adjust=False).mean()
+    df['macd'] = macd_line - signal_line
+    df['macd'] = df['macd'].fillna(0.0).replace([np.inf, -np.inf], 0.0)
+
+    # Step 6: ATR (14)
+    high_low = df['high'] - df['low']
+    high_close = (df['high'] - df['close'].shift()).abs()
+    low_close = (df['low'] - df['close'].shift()).abs()
+    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+    df['atr'] = tr.rolling(window=14).mean().fillna(0.0)
+
+    # Step 7: Bollinger Bands width (20,2)
+    sma = df['close'].rolling(window=20).mean()
+    std = df['close'].rolling(window=20).std()
+    upper = sma + (std * 2)
+    lower = sma - (std * 2)
+    df['bb_width'] = (upper - lower) / sma
+    df['bb_width'] = df['bb_width'].fillna(0.0).replace([np.inf, -np.inf], 0.0)
+
+    # Final cleaning: ensure no None or inf remains
+    for col in FEATURE_COLS:
+        if col not in df.columns:
+            df[col] = 0.0
+        else:
+            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0)
+            df[col] = df[col].replace([np.inf, -np.inf], 0.0)
+
+    return df[FEATURE_COLS]
+
+# ---------- DATABASE HELPERS (unchanged) ----------
 def log_error_to_db(bot_name, error_msg):
     db_url = os.getenv('DATABASE_URL')
     if not db_url: return
@@ -139,7 +203,6 @@ async def sync_filled_orders(bot_name):
                     logger.error(f"Error syncing order {oid}: {e}")
 
 async def get_clean_ohlcv_dataframe(symbol):
-    """Return a 5‑minute OHLCV DataFrame with no None/NaN/inf."""
     end = datetime.now()
     start = end - timedelta(hours=6)
     request = CryptoBarsRequest(
@@ -190,14 +253,14 @@ async def get_clean_ohlcv_dataframe(symbol):
     ohlc_5 = ohlc_5.iloc[-SEQUENCE_LEN:]
     return ohlc_5.astype(float)
 
-# --- Safe Predictor that sanitizes after each step ---
+# --- Safe Predictor using our own feature engineering ---
 class SafeMLPredictor:
     def __init__(self, model_path, seq_len=32):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.seq_len = seq_len
         if not os.path.exists(model_path):
             raise FileNotFoundError(f"Model file not found at {model_path}")
-        self.input_dim = len(FEATURE_COLS)  # should be 11
+        self.input_dim = len(FEATURE_COLS)
         self.model = GrokGQA_Transformer(
             input_dim=self.input_dim, seq_len=seq_len,
             embed_dim=128, num_layers=8, num_q_heads=16, num_kv_heads=4, dropout=0.1
@@ -216,7 +279,7 @@ class SafeMLPredictor:
 
     def predict(self, df: pd.DataFrame) -> float:
         try:
-            # Step 1: sanitize input
+            # Step 1: basic sanitization of input
             df = df.copy()
             required = ['open', 'high', 'low', 'close', 'volume']
             for col in required:
@@ -225,33 +288,25 @@ class SafeMLPredictor:
                 df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0)
             df = df.map(lambda x: 0.0 if x is None else x)
 
-            # Step 2: add features
-            df_features = add_features(df)
-            # Step 3: sanitize features
-            for col in FEATURE_COLS:
-                if col not in df_features.columns:
-                    df_features[col] = 0.0
-                else:
-                    df_features[col] = pd.to_numeric(df_features[col], errors='coerce').fillna(0.0)
-            df_features = df_features.map(lambda x: 0.0 if x is None else x)
+            # Step 2: compute features using our safe function
+            df_features = safe_add_features(df)
 
-            # Step 4: extract sequence
+            # Step 3: extract sequence and scale
             data = df_features[FEATURE_COLS].tail(self.seq_len).values.astype(np.float32)
             if len(data) < self.seq_len:
                 logger.warning(f"Insufficient rows after feature engineering: {len(data)}")
                 return 0.5
 
-            # Step 5: scale
             if self.scaler is not None:
                 data = self.scaler.transform(data).astype(np.float32)
 
-            # Step 6: predict
+            # Step 4: predict
             x = torch.tensor(data).unsqueeze(0).to(self.device)
             with torch.no_grad():
                 pred = self.model(x).item()
             return float(pred)
         except Exception as e:
-            logger.error(f"Prediction error in SafeMLPredictor: {e}")
+            logger.error(f"Prediction error: {e}")
             return 0.5
 
 async def run_trading_mode(bot_name):
