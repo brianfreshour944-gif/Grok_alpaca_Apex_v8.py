@@ -19,7 +19,7 @@ from alpaca.data.historical import CryptoHistoricalDataClient
 from alpaca.data.requests import CryptoBarsRequest
 from alpaca.data.timeframe import TimeFrame
 
-# Import only the model architecture and constants, not the buggy add_features
+# Import model architecture and constants (make sure ml_predictor.py is in the same directory)
 from ml_predictor import GrokGQA_Transformer, FEATURE_COLS
 
 load_dotenv()
@@ -43,38 +43,36 @@ data_client = CryptoHistoricalDataClient()
 positions = {symbol: False for symbol in SYMBOLS}
 cooldown_until = 0.0
 
-# ---------- SAFE FEATURE ENGINEERING (replaces buggy version) ----------
+# ---------- HELPER FUNCTION FOR SYMBOL FORMAT (FIX FOR SELL) ----------
+def get_position_symbol(symbol: str) -> str:
+    """Convert 'BTC/USD' -> 'BTCUSD' for Alpaca's get_position endpoint."""
+    return symbol.replace("/", "")
+
+# ---------- SAFE FEATURE ENGINEERING ----------
 def safe_add_features(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Calculate all 11 features exactly as the model expects, but with aggressive
-    None → NaN → 0.0 conversion at every step. Guarantees no None remains.
+    Calculate all 11 features exactly as the model expects, with aggressive
+    None → NaN → 0.0 conversion at every step.
     """
-    # Step 1: ensure we have all required columns and convert None to NaN
     required = ['open', 'high', 'low', 'close', 'volume']
     for col in required:
         if col not in df.columns:
             df[col] = 0.0
-        # Convert any None to NaN, then to float, fill NaN with 0.0
         df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0)
     df = df.copy()
 
-    # Step 2: calculate returns
     df['returns'] = df['close'].pct_change().fillna(0.0)
-
-    # Step 3: vol_14 (rolling std of returns)
     df['vol_14'] = df['returns'].rolling(window=14).std().fillna(0.0)
 
-    # Step 4: RSI (14)
     delta = df['close'].diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
     avg_gain = gain.rolling(window=14).mean()
     avg_loss = loss.rolling(window=14).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)  # avoid division by zero
+    rs = avg_gain / avg_loss.replace(0, np.nan)
     rsi = 100 - (100 / (1 + rs))
     df['rsi'] = rsi.fillna(50.0).replace([np.inf, -np.inf], 50.0)
 
-    # Step 5: MACD (12,26,9)
     exp1 = df['close'].ewm(span=12, adjust=False).mean()
     exp2 = df['close'].ewm(span=26, adjust=False).mean()
     macd_line = exp1 - exp2
@@ -82,14 +80,12 @@ def safe_add_features(df: pd.DataFrame) -> pd.DataFrame:
     df['macd'] = macd_line - signal_line
     df['macd'] = df['macd'].fillna(0.0).replace([np.inf, -np.inf], 0.0)
 
-    # Step 6: ATR (14)
     high_low = df['high'] - df['low']
     high_close = (df['high'] - df['close'].shift()).abs()
     low_close = (df['low'] - df['close'].shift()).abs()
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
     df['atr'] = tr.rolling(window=14).mean().fillna(0.0)
 
-    # Step 7: Bollinger Bands width (20,2)
     sma = df['close'].rolling(window=20).mean()
     std = df['close'].rolling(window=20).std()
     upper = sma + (std * 2)
@@ -97,7 +93,6 @@ def safe_add_features(df: pd.DataFrame) -> pd.DataFrame:
     df['bb_width'] = (upper - lower) / sma
     df['bb_width'] = df['bb_width'].fillna(0.0).replace([np.inf, -np.inf], 0.0)
 
-    # Final cleaning: ensure no None or inf remains
     for col in FEATURE_COLS:
         if col not in df.columns:
             df[col] = 0.0
@@ -107,10 +102,11 @@ def safe_add_features(df: pd.DataFrame) -> pd.DataFrame:
 
     return df[FEATURE_COLS]
 
-# ---------- DATABASE HELPERS (unchanged) ----------
+# ---------- DATABASE HELPERS ----------
 def log_error_to_db(bot_name, error_msg):
     db_url = os.getenv('DATABASE_URL')
-    if not db_url: return
+    if not db_url:
+        return
     try:
         with psycopg2.connect(db_url) as conn:
             with conn.cursor() as cur:
@@ -154,7 +150,8 @@ def sync_trade_to_db(bot_name, side, price, qty, symbol, order_id, fee=0.0):
 
 def register_order_in_db(bot_name, order_id, symbol, side, price):
     db_url = os.getenv('DATABASE_URL')
-    if not db_url: return
+    if not db_url:
+        return
     try:
         with psycopg2.connect(db_url) as conn:
             with conn.cursor() as cur:
@@ -182,7 +179,8 @@ def execute_trade(bot_name, symbol, side, qty):
 
 async def sync_filled_orders(bot_name):
     db_url = os.getenv('DATABASE_URL')
-    if not db_url: return
+    if not db_url:
+        return
     with psycopg2.connect(db_url) as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT order_id, symbol FROM bot_orders WHERE bot_name = %s AND status = 'OPEN'", (bot_name,))
@@ -279,7 +277,6 @@ class SafeMLPredictor:
 
     def predict(self, df: pd.DataFrame) -> float:
         try:
-            # Step 1: basic sanitization of input
             df = df.copy()
             required = ['open', 'high', 'low', 'close', 'volume']
             for col in required:
@@ -288,10 +285,8 @@ class SafeMLPredictor:
                 df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0)
             df = df.map(lambda x: 0.0 if x is None else x)
 
-            # Step 2: compute features using our safe function
             df_features = safe_add_features(df)
 
-            # Step 3: extract sequence and scale
             data = df_features[FEATURE_COLS].tail(self.seq_len).values.astype(np.float32)
             if len(data) < self.seq_len:
                 logger.warning(f"Insufficient rows after feature engineering: {len(data)}")
@@ -300,7 +295,6 @@ class SafeMLPredictor:
             if self.scaler is not None:
                 data = self.scaler.transform(data).astype(np.float32)
 
-            # Step 4: predict
             x = torch.tensor(data).unsqueeze(0).to(self.device)
             with torch.no_grad():
                 pred = self.model(x).item()
@@ -345,7 +339,8 @@ async def run_trading_mode(bot_name):
                         logger.info(f"🎯 BUY signal for {symbol} at {current_price:.2f} (prob={signal:.3f})")
                 elif signal < 0.49 and positions.get(symbol, False):
                     try:
-                        position = trading_client.get_position(symbol)
+                        # FIX: use helper to convert 'BTC/USD' -> 'BTCUSD'
+                        position = trading_client.get_position(get_position_symbol(symbol))
                         qty = float(position.qty)
                         if qty > 0:
                             order = execute_trade(bot_name, symbol, OrderSide.SELL, qty)
@@ -353,7 +348,8 @@ async def run_trading_mode(bot_name):
                                 positions[symbol] = False
                                 cooldown_until = time.time() + 300
                                 logger.info(f"🔻 SELL signal for {symbol} at {df['close'].iloc[-1]:.2f} (prob={signal:.3f})")
-                    except Exception:
+                    except Exception as e:
+                        logger.error(f"Sell failed for {symbol}: {e}")
                         positions[symbol] = False
                 else:
                     logger.debug(f"No trade for {symbol} (signal={signal:.3f})")
