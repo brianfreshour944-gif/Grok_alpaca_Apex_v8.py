@@ -1,3 +1,4 @@
+
 #!/usr/bin/env python3
 import asyncio
 import logging
@@ -19,7 +20,6 @@ from alpaca.data.historical import CryptoHistoricalDataClient
 from alpaca.data.requests import CryptoBarsRequest
 from alpaca.data.timeframe import TimeFrame
 
-# Import model architecture and constants (make sure ml_predictor.py is in the same directory)
 from ml_predictor import GrokGQA_Transformer, FEATURE_COLS
 
 load_dotenv()
@@ -40,20 +40,16 @@ PAPER = os.getenv("APCA_API_PAPER", "true").lower() == "true"
 trading_client = TradingClient(api_key=API_KEY, secret_key=API_SECRET, paper=PAPER)
 data_client = CryptoHistoricalDataClient()
 
-positions = {symbol: False for symbol in SYMBOLS}
-cooldown_until = 0.0
+# Per‑symbol cooldowns (seconds) after a buy or failed sell
+cooldown_until = {symbol: 0.0 for symbol in SYMBOLS}
 
-# ---------- HELPER FUNCTION FOR SYMBOL FORMAT (FIX FOR SELL) ----------
+# ---------- HELPER FUNCTION FOR SYMBOL FORMAT ----------
 def get_position_symbol(symbol: str) -> str:
     """Convert 'BTC/USD' -> 'BTCUSD' for Alpaca's get_position endpoint."""
     return symbol.replace("/", "")
 
-# ---------- SAFE FEATURE ENGINEERING ----------
+# ---------- SAFE FEATURE ENGINEERING (unchanged) ----------
 def safe_add_features(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Calculate all 11 features exactly as the model expects, with aggressive
-    None → NaN → 0.0 conversion at every step.
-    """
     required = ['open', 'high', 'low', 'close', 'volume']
     for col in required:
         if col not in df.columns:
@@ -102,7 +98,7 @@ def safe_add_features(df: pd.DataFrame) -> pd.DataFrame:
 
     return df[FEATURE_COLS]
 
-# ---------- DATABASE HELPERS ----------
+# ---------- DATABASE HELPERS (same as before) ----------
 def log_error_to_db(bot_name, error_msg):
     db_url = os.getenv('DATABASE_URL')
     if not db_url:
@@ -171,14 +167,14 @@ def execute_trade(bot_name, symbol, side, qty):
                 symbol=symbol, qty=qty, side=side, time_in_force=TimeInForce.GTC
             )
         )
-        # Verify the order actually exists on Alpaca side
+        # Verify the order exists on Alpaca before storing
         try:
             trading_client.get_order_by_id(order.id)
             register_order_in_db(bot_name, order.id, symbol, side.value, 0.0)
             logger.info(f"✅ Placed {side.value} order for {symbol} | Qty: {qty:.6f} | Order ID: {order.id}")
             return order
         except Exception as verify_err:
-            logger.error(f"Order {order.id} not confirmed by Alpaca after placement: {verify_err}")
+            logger.error(f"Order {order.id} not confirmed by Alpaca: {verify_err}")
             return None
     except Exception as e:
         log_error_to_db(bot_name, f"Trade execution failed for {symbol}: {e}")
@@ -202,13 +198,11 @@ async def sync_filled_orders(bot_name):
                             alpaca_order.filled_avg_price, alpaca_order.filled_qty,
                             symbol, oid, fee=0.0
                         )
-                        if alpaca_order.side == OrderSide.SELL:
-                            positions[symbol] = False
+                        # No need to update any in‑memory flag – we will query real positions later
                 except Exception as e:
                     error_msg = str(e)
-                    # If order not found on Alpaca side (404), mark it as ERROR to stop retrying
                     if "40410000" in error_msg or "order not found" in error_msg.lower():
-                        logger.warning(f"Order {oid} not found on Alpaca – marking as ERROR")
+                        logger.warning(f"Order {oid} not found – marking as ERROR")
                         cur.execute("UPDATE bot_orders SET status = 'ERROR' WHERE order_id = %s", (oid,))
                         conn.commit()
                     else:
@@ -265,7 +259,7 @@ async def get_clean_ohlcv_dataframe(symbol):
     ohlc_5 = ohlc_5.iloc[-SEQUENCE_LEN:]
     return ohlc_5.astype(float)
 
-# --- Safe Predictor using our own feature engineering ---
+# --- Safe ML Predictor (unchanged) ---
 class SafeMLPredictor:
     def __init__(self, model_path, seq_len=32):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -318,7 +312,7 @@ class SafeMLPredictor:
             return 0.5
 
 async def run_trading_mode(bot_name):
-    global cooldown_until, positions
+    global cooldown_until
     predictor = SafeMLPredictor(model_path=MODEL_PATH, seq_len=SEQUENCE_LEN)
     logger.info("SafeMLPredictor loaded. Starting trading loop...")
 
@@ -327,56 +321,66 @@ async def run_trading_mode(bot_name):
             check_status(bot_name)
             await sync_filled_orders(bot_name)
 
-            if time.time() < cooldown_until:
-                logger.info(f"Global cooldown active, sleeping {cooldown_until - time.time():.0f}s")
-                await asyncio.sleep(60)
-                continue
-
             for symbol in SYMBOLS:
-                if positions.get(symbol, False):
-                    logger.debug(f"Already in position for {symbol}, skipping")
+                # 1. Respect per‑symbol cooldown
+                if time.time() < cooldown_until.get(symbol, 0.0):
+                    logger.debug(f"{symbol} cooldown active, skipping")
                     continue
 
+                # 2. Check if we already have an open position (real, not memory)
+                try:
+                    pos_symbol = get_position_symbol(symbol)
+                    position = trading_client.get_position(pos_symbol)
+                    has_position = True
+                    qty_held = float(position.qty)
+                except Exception:
+                    has_position = False
+                    qty_held = 0.0
+
+                # 3. Get fresh data and signal
                 df = await get_clean_ohlcv_dataframe(symbol)
                 if df is None:
                     continue
-
                 signal = predictor.predict(df)
+                current_price = df['close'].iloc[-1]
 
-                if signal > 0.51:
-                    current_price = df['close'].iloc[-1]
+                # 4. SELL logic (if we have a position and signal < 0.49)
+                if has_position and signal < 0.49:
+                    logger.info(f"🔻 SELL signal for {symbol} (signal={signal:.3f}), attempting to sell {qty_held} units")
+                    order = execute_trade(bot_name, symbol, OrderSide.SELL, qty_held)
+                    if order:
+                        # Set a long cooldown after a successful sell (1 hour)
+                        cooldown_until[symbol] = time.time() + 3600
+                        logger.info(f"✅ Sell order placed for {symbol}")
+                    else:
+                        # If sell order fails, do NOT reset cooldown – just log and continue
+                        logger.error(f"❌ Sell order failed for {symbol}")
+                    # After attempting to sell, skip further actions for this symbol this cycle
+                    continue
+
+                # 5. BUY logic (only if we have NO position AND signal > 0.51)
+                if not has_position and signal > 0.51:
                     qty = ORDER_AMOUNT / current_price
+                    logger.info(f"🎯 BUY signal for {symbol} at {current_price:.2f} (signal={signal:.3f})")
                     order = execute_trade(bot_name, symbol, OrderSide.BUY, qty)
                     if order:
-                        positions[symbol] = True
-                        cooldown_until = time.time() + 300
-                        logger.info(f"🎯 BUY signal for {symbol} at {current_price:.2f} (prob={signal:.3f})")
-                elif signal < 0.49 and positions.get(symbol, False):
-                    try:
-                        # FIX: use helper to convert 'BTC/USD' -> 'BTCUSD'
-                        position = trading_client.get_position(get_position_symbol(symbol))
-                        qty = float(position.qty)
-                        if qty > 0:
-                            order = execute_trade(bot_name, symbol, OrderSide.SELL, qty)
-                            if order:
-                                positions[symbol] = False
-                                cooldown_until = time.time() + 300
-                                logger.info(f"🔻 SELL signal for {symbol} at {df['close'].iloc[-1]:.2f} (prob={signal:.3f})")
-                    except Exception as e:
-                        logger.error(f"Sell failed for {symbol}: {e}")
-                        positions[symbol] = False
-                else:
-                    logger.debug(f"No trade for {symbol} (signal={signal:.3f})")
+                        # Set cooldown after buying to prevent immediate re‑buy on next cycle
+                        cooldown_until[symbol] = time.time() + 600   # 10 minutes
+                        logger.info(f"✅ Buy order placed for {symbol}")
+                    else:
+                        logger.error(f"❌ Buy order failed for {symbol}")
 
+                # Small delay between symbols to avoid rate limits
                 await asyncio.sleep(2)
 
-            await asyncio.sleep(300)
+            # Wait 60 seconds before the next full cycle
+            await asyncio.sleep(60)
 
         except Exception as e:
             error_msg = f"Main loop error: {e}"
             logger.error(error_msg)
             log_error_to_db(bot_name, error_msg)
-            await asyncio.sleep(60)
+            await asyncio.sleep(30)
 
 if __name__ == "__main__":
     try:
