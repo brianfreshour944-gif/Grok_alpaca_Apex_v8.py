@@ -40,7 +40,7 @@ data_client = CryptoHistoricalDataClient()
 positions = {symbol: False for symbol in SYMBOLS}
 cooldown_until = 0.0
 
-# ---------- DATABASE HELPERS (unchanged) ----------
+# ---------- DATABASE HELPERS ----------
 def log_error_to_db(bot_name, error_msg):
     db_url = os.getenv('DATABASE_URL')
     if not db_url: return
@@ -136,10 +136,7 @@ async def sync_filled_orders(bot_name):
                     logger.error(f"Error syncing order {oid}: {e}")
 
 async def get_clean_ohlcv_dataframe(symbol):
-    """
-    Fetch minute bars, resample to 5min, and return a DataFrame with columns
-    ['open','high','low','close','volume'] that contains no None or NaN.
-    """
+    """Fetch minute bars, resample to 5min, return clean DataFrame with no None/NaN."""
     end = datetime.now()
     start = end - timedelta(hours=6)
     request = CryptoBarsRequest(
@@ -154,17 +151,15 @@ async def get_clean_ohlcv_dataframe(symbol):
         logger.warning(f"Insufficient minute bars for {symbol}: {len(bars)} < {SEQUENCE_LEN}")
         return None
 
-    # Build DataFrame and convert None to nan
     data = []
     for b in bars:
-        # Ensure each field is a float; if None, use nan
         data.append({
             'timestamp': b.timestamp,
-            'open': float(b.open) if b.open is not None else np.nan,
-            'high': float(b.high) if b.high is not None else np.nan,
-            'low': float(b.low) if b.low is not None else np.nan,
-            'close': float(b.close) if b.close is not None else np.nan,
-            'volume': float(b.volume) if b.volume is not None else np.nan,
+            'open': float(b.open) if b.open is not None else float('nan'),
+            'high': float(b.high) if b.high is not None else float('nan'),
+            'low': float(b.low) if b.low is not None else float('nan'),
+            'close': float(b.close) if b.close is not None else float('nan'),
+            'volume': float(b.volume) if b.volume is not None else 0.0,
         })
     df = pd.DataFrame(data)
     df.sort_values('timestamp', inplace=True)
@@ -172,7 +167,6 @@ async def get_clean_ohlcv_dataframe(symbol):
     if df.index.tz is not None:
         df.index = df.index.tz_localize(None)
 
-    # Resample to 5 minutes
     ohlc_5 = df.resample('5min').agg({
         'open': 'first',
         'high': 'max',
@@ -181,26 +175,18 @@ async def get_clean_ohlcv_dataframe(symbol):
         'volume': 'sum'
     })
 
-    # Fill missing values: forward fill prices, volume fill with 0
-    ohlc_5 = ohlc_5.fillna(method='ffill')
+    # Clean price columns: forward fill then backward fill
+    ohlc_5[['open','high','low','close']] = ohlc_5[['open','high','low','close']].ffill().bfill()
     ohlc_5['volume'] = ohlc_5['volume'].fillna(0.0)
-
-    # Drop any rows that still have NaN (should not happen after ffill)
     ohlc_5.dropna(inplace=True)
 
     if len(ohlc_5) < SEQUENCE_LEN:
         logger.warning(f"Not enough clean 5‑min bars for {symbol}: {len(ohlc_5)}")
         return None
 
-    # Keep only the last SEQUENCE_LEN rows
     ohlc_5 = ohlc_5.iloc[-SEQUENCE_LEN:]
-
-    # Double‑check no None remains
-    for col in ['open','high','low','close','volume']:
-        if ohlc_5[col].isnull().any():
-            logger.warning(f"Still NaN in {col} for {symbol}, filling with 0")
-            ohlc_5[col] = ohlc_5[col].fillna(0.0)
-
+    # Final safety: replace inf and remaining NaN with 0
+    ohlc_5 = ohlc_5.replace([np.inf, -np.inf], np.nan).fillna(0.0)
     return ohlc_5
 
 async def run_trading_mode(bot_name):
@@ -227,14 +213,12 @@ async def run_trading_mode(bot_name):
                 if df is None:
                     continue
 
-                # Predict using the cleaned DataFrame
                 try:
-                    signal = predictor.predict(df)   # returns float 0-1
+                    signal = predictor.predict(df)
                 except Exception as e:
                     logger.error(f"Prediction error for {symbol}: {e}")
                     continue
 
-                # Use thresholds from MLPredictor docstring
                 if signal > 0.51:
                     current_price = df['close'].iloc[-1]
                     qty = ORDER_AMOUNT / current_price
@@ -244,7 +228,6 @@ async def run_trading_mode(bot_name):
                         cooldown_until = time.time() + 300
                         logger.info(f"🎯 BUY signal for {symbol} at {current_price:.2f} (prob={signal:.3f})")
                 elif signal < 0.49 and positions.get(symbol, False):
-                    # Optional auto‑sell on bearish signal
                     try:
                         position = trading_client.get_position(symbol)
                         qty = float(position.qty)
@@ -259,9 +242,9 @@ async def run_trading_mode(bot_name):
                 else:
                     logger.debug(f"No trade for {symbol} (signal={signal:.3f})")
 
-                await asyncio.sleep(2)   # small delay between symbols
+                await asyncio.sleep(2)
 
-            await asyncio.sleep(300)   # scan every 5 minutes
+            await asyncio.sleep(300)
 
         except Exception as e:
             error_msg = f"Main loop error: {e}"
