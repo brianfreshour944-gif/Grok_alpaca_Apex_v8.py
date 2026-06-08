@@ -198,7 +198,14 @@ async def sync_filled_orders(bot_name):
                         if alpaca_order.side == OrderSide.SELL:
                             positions[symbol] = False
                 except Exception as e:
-                    logger.error(f"Error syncing order {oid}: {e}")
+                    error_msg = str(e)
+                    # If order not found on Alpaca side (404), mark it as ERROR to stop retrying
+                    if "40410000" in error_msg or "order not found" in error_msg.lower():
+                        logger.warning(f"Order {oid} not found on Alpaca – marking as ERROR")
+                        cur.execute("UPDATE bot_orders SET status = 'ERROR' WHERE order_id = %s", (oid,))
+                        conn.commit()
+                    else:
+                        logger.error(f"Error syncing order {oid}: {e}")
 
 async def get_clean_ohlcv_dataframe(symbol):
     end = datetime.now()
