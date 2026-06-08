@@ -1,3 +1,4 @@
+
 #!/usr/bin/env python3
 import asyncio
 import logging
@@ -136,7 +137,7 @@ async def sync_filled_orders(bot_name):
                     logger.error(f"Error syncing order {oid}: {e}")
 
 async def get_clean_ohlcv_dataframe(symbol):
-    """Return a 5‑minute OHLCV DataFrame with NO None, NaN, or inf."""
+    """Return a 5‑minute OHLCV DataFrame with no None/NaN/inf."""
     end = datetime.now()
     start = end - timedelta(hours=6)
     request = CryptoBarsRequest(
@@ -177,44 +178,46 @@ async def get_clean_ohlcv_dataframe(symbol):
         'volume': 'sum'
     })
 
-    # AGGRESSIVE CLEAN: convert all to float, fill NaN with 0.0, replace inf
+    # Aggressive cleaning
     for col in ['open', 'high', 'low', 'close', 'volume']:
         ohlc_5[col] = pd.to_numeric(ohlc_5[col], errors='coerce').fillna(0.0)
         ohlc_5[col] = ohlc_5[col].replace([np.inf, -np.inf], 0.0)
-
-    # Replace any lingering None (should be none after to_numeric)
     ohlc_5 = ohlc_5.map(lambda x: 0.0 if x is None else x)
 
     if len(ohlc_5) < SEQUENCE_LEN:
         logger.warning(f"Not enough clean 5‑min bars for {symbol}: {len(ohlc_5)}")
         return None
 
-    # Keep only the last SEQUENCE_LEN rows
     ohlc_5 = ohlc_5.iloc[-SEQUENCE_LEN:]
-
-    # Final sanity: all values must be float
-    ohlc_5 = ohlc_5.astype(float)
-    return ohlc_5
-
-def safe_predict(predictor, df):
-    """Wraps predictor.predict with aggressive cleaning and error recovery."""
-    # Ultimate cleaning: convert entire DataFrame to float, None/NaN to 0.0
-    df_clean = df.copy()
-    for col in df_clean.columns:
-        df_clean[col] = pd.to_numeric(df_clean[col], errors='coerce').fillna(0.0)
-    df_clean = df_clean.map(lambda x: 0.0 if x is None else x)
-    df_clean = df_clean.astype(float)
-    try:
-        return predictor.predict(df_clean)
-    except Exception as e:
-        logger.error(f"Prediction failed even after cleaning: {e}")
-        # Last resort: return neutral signal
-        return 0.5
+    return ohlc_5.astype(float)
 
 async def run_trading_mode(bot_name):
     global cooldown_until, positions
     predictor = MLPredictor(model_path=MODEL_PATH, seq_len=SEQUENCE_LEN)
-    logger.info("MLPredictor loaded. Starting trading loop...")
+
+    # ---- Monkey-patch the predict method to sanitize the DataFrame ----
+    original_predict = predictor.predict
+
+    def sanitized_predict(df):
+        # Ultimate sanitisation: convert every value to float, replace None/NaN/inf with 0.0
+        df_clean = df.copy()
+        # Force all columns to numeric, coercing errors to NaN, then fill with 0.0
+        for col in df_clean.columns:
+            df_clean[col] = pd.to_numeric(df_clean[col], errors='coerce').fillna(0.0)
+        # Replace any remaining None (should not happen) with 0.0
+        df_clean = df_clean.map(lambda x: 0.0 if x is None else x)
+        # Ensure float type
+        df_clean = df_clean.astype(float)
+        try:
+            return original_predict(df_clean)
+        except Exception as e:
+            logger.error(f"Prediction error after sanitization: {e}")
+            return 0.5  # neutral signal
+
+    predictor.predict = sanitized_predict
+    # ----------------------------------------------------------------
+
+    logger.info("MLPredictor loaded and patched. Starting trading loop...")
 
     while True:
         try:
@@ -235,7 +238,7 @@ async def run_trading_mode(bot_name):
                 if df is None:
                     continue
 
-                signal = safe_predict(predictor, df)
+                signal = predictor.predict(df)
 
                 if signal > 0.51:
                     current_price = df['close'].iloc[-1]
