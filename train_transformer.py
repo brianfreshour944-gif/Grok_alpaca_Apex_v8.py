@@ -6,6 +6,7 @@ import sys
 import time
 import psycopg2
 import pandas as pd
+import numpy as np
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
@@ -36,7 +37,7 @@ PAPER = os.getenv("APCA_API_PAPER", "true").lower() == "true"
 trading_client = TradingClient(api_key=API_KEY, secret_key=API_SECRET, paper=PAPER)
 data_client = CryptoHistoricalDataClient()
 
-# --- POSITION TRACKING (in‑memory, avoid double buys) ---
+# --- POSITION TRACKING ---
 positions = {symbol: False for symbol in SYMBOLS}
 cooldown_until = 0.0
 
@@ -100,7 +101,6 @@ def register_order_in_db(bot_name, order_id, symbol, side, price):
         logger.error(f"Failed to register order in DB: {e}")
 
 def execute_trade(bot_name, symbol, side, qty):
-    """Place market order and log it."""
     try:
         order = trading_client.submit_order(
             order_data=MarketOrderRequest(
@@ -115,7 +115,6 @@ def execute_trade(bot_name, symbol, side, qty):
         return None
 
 async def sync_filled_orders(bot_name):
-    """Check open orders and mark filled ones as CLOSED, log to trades."""
     db_url = os.getenv('DATABASE_URL')
     if not db_url: return
     with psycopg2.connect(db_url) as conn:
@@ -127,58 +126,65 @@ async def sync_filled_orders(bot_name):
                     if alpaca_order.status == 'filled':
                         cur.execute("UPDATE bot_orders SET status = 'CLOSED' WHERE order_id = %s", (oid,))
                         conn.commit()
-                        # Use 0.0 fee (Alpaca doesn't provide per‑order fee in standard call)
                         sync_trade_to_db(
                             bot_name, alpaca_order.side.value,
                             alpaca_order.filled_avg_price, alpaca_order.filled_qty,
                             symbol, oid, fee=0.0
                         )
-                        # Update in‑memory position flag (only if sell order)
                         if alpaca_order.side == OrderSide.SELL:
                             positions[symbol] = False
                 except Exception as e:
                     logger.error(f"Error syncing order {oid}: {e}")
 
-async def get_features_for_symbol(symbol, predictor, seq_len=SEQUENCE_LEN):
+async def get_features_for_symbol(symbol, predictor):
     """
-    Fetch the last `seq_len` 5‑minute bars, convert to features expected by MLPredictor.
-    Assumes `predictor` has a `prepare_features` method or similar.
-    Adjust based on your actual `MLPredictor` interface.
+    Fetch the last `SEQUENCE_LEN` 5‑minute bars for the given symbol (e.g., "BTC/USD")
+    and return a numpy array of shape (1, SEQUENCE_LEN, num_features) or (SEQUENCE_LEN, num_features)
+    depending on what the MLPredictor expects.
     """
-    # Use 5‑minute bars for fast signals
-    request_symbol = symbol.replace("/", "")  # Alpaca data needs e.g. "BTCUSD"
+    # Use the symbol exactly as is, with slash
     end = datetime.now()
-    start = end - timedelta(hours=6)   # enough for 32 * 5min = 160min
+    start = end - timedelta(hours=6)   # enough for 32 * 5min = 160 min
     request = CryptoBarsRequest(
-        symbol_or_symbols=request_symbol,
+        symbol_or_symbols=symbol,      # keep slash format
         timeframe=TimeFrame.Minute,
         start=start,
         end=end,
         limit=200
     )
-    bars = data_client.get_crypto_bars(request).data.get(request_symbol, [])
-    if len(bars) < seq_len:
-        logger.warning(f"Insufficient bars for {symbol}: {len(bars)} < {seq_len}")
+    bars = data_client.get_crypto_bars(request).data.get(symbol, [])
+    if len(bars) < SEQUENCE_LEN:
+        logger.warning(f"Insufficient minute bars for {symbol}: {len(bars)} < {SEQUENCE_LEN}")
         return None
 
     # Convert to DataFrame and resample to 5 minutes
-    df = pd.DataFrame([{'timestamp': b.timestamp, 'close': float(b.close),
-                        'high': float(b.high), 'low': float(b.low), 'volume': float(b.volume)} for b in bars])
+    df = pd.DataFrame([{
+        'timestamp': b.timestamp,
+        'close': float(b.close),
+        'high': float(b.high),
+        'low': float(b.low),
+        'volume': float(b.volume)
+    } for b in bars])
     df.sort_values('timestamp', inplace=True)
     df.set_index('timestamp', inplace=True)
     if df.index.tz is not None:
         df.index = df.index.tz_localize(None)
-    ohlc_5 = df.resample('5min').agg({'close': 'last', 'high': 'max', 'low': 'min', 'volume': 'sum'}).dropna()
-    if len(ohlc_5) < seq_len:
+    ohlc_5 = df.resample('5min').agg({
+        'close': 'last',
+        'high': 'max',
+        'low': 'min',
+        'volume': 'sum'
+    }).dropna()
+
+    if len(ohlc_5) < SEQUENCE_LEN:
         logger.warning(f"Not enough 5‑min bars for {symbol}: {len(ohlc_5)}")
         return None
 
-    # Use last `seq_len` rows
-    features = ohlc_5[['close', 'high', 'low', 'volume']].values[-seq_len:]
-    # The MLPredictor likely expects a numpy array of shape (1, seq_len, num_features)
-    # or (seq_len, num_features). Adjust according to your predictor.
-    # I assume it takes a 2D array (seq_len, features) and returns a binary signal.
-    return features
+    # Take the last SEQUENCE_LEN rows
+    features = ohlc_5[['close', 'high', 'low', 'volume']].values[-SEQUENCE_LEN:]
+    # The MLPredictor likely expects a 2D array (seq_len, num_features) or a 3D batch.
+    # We'll return as (1, seq_len, num_features) to be safe.
+    return np.expand_dims(features, axis=0)  # shape (1, seq_len, 4)
 
 async def run_trading_mode(bot_name):
     global cooldown_until, positions
@@ -190,55 +196,45 @@ async def run_trading_mode(bot_name):
             check_status(bot_name)
             await sync_filled_orders(bot_name)
 
-            # Global cooldown after any trade (avoid rapid fire)
             if time.time() < cooldown_until:
                 logger.info(f"Global cooldown active, sleeping {cooldown_until - time.time():.0f}s")
                 await asyncio.sleep(60)
                 continue
 
             for symbol in SYMBOLS:
-                # Skip if already in position (to avoid multiple buys)
                 if positions.get(symbol, False):
                     logger.debug(f"Already in position for {symbol}, skipping")
                     continue
 
-                # Get features for this symbol
                 features = await get_features_for_symbol(symbol, predictor)
                 if features is None:
                     continue
 
                 # Get prediction from model
-                # I assume MLPredictor has a method .predict(features) returning 0 or 1
-                # If it returns a probability > threshold, adjust accordingly.
                 try:
-                    signal = predictor.predict(features)  # adjust method name if needed
+                    # Assuming predictor has a .predict() method returning 0 or 1
+                    signal = predictor.predict(features)
                 except AttributeError:
-                    # Fallback: try to call .forward or .__call__
+                    # Fallback: treat the predictor as a callable
                     signal = predictor(features)
 
-                # Signal interpretation (1 = buy, 0 = hold)
+                # Interpret signal (adjust threshold if needed)
                 if signal == 1:
-                    current_price = features[-1][0]  # last closing price
+                    current_price = features[0, -1, 0]  # last close from last sequence
                     qty = ORDER_AMOUNT / current_price
                     order = execute_trade(bot_name, symbol, OrderSide.BUY, qty)
                     if order:
                         positions[symbol] = True
-                        cooldown_until = time.time() + 300  # 5 min cooldown after any trade
+                        cooldown_until = time.time() + 300  # 5 min cooldown
                         logger.info(f"🎯 BUY signal for {symbol} at {current_price:.2f}")
                     else:
                         logger.error(f"Order placement failed for {symbol}")
                 else:
                     logger.debug(f"No buy signal for {symbol}")
 
-                # Small delay between symbols to avoid rate limits
-                await asyncio.sleep(2)
+                await asyncio.sleep(2)  # small delay between symbols
 
-            # Also need to check for sell signals – but your model may only predict buys.
-            # If the model can also predict sells, you'd add a similar loop to check positions and sell.
-            # For now, only buy signals are used; sells will be handled manually or by a stop loss.
-            # Optionally, you can add a trailing stop or time‑based exit.
-
-            # Sleep 5 minutes before next full scan (adjust as needed)
+            # Sleep 5 minutes before next full scan
             await asyncio.sleep(300)
 
         except Exception as e:
