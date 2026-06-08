@@ -136,7 +136,10 @@ async def sync_filled_orders(bot_name):
                     logger.error(f"Error syncing order {oid}: {e}")
 
 async def get_clean_ohlcv_dataframe(symbol):
-    """Fetch minute bars, resample to 5min, return clean DataFrame with no None/NaN."""
+    """
+    Fetch minute bars, resample to 5min, return DataFrame with NO None, NaN, or inf.
+    Every cell is a Python float.
+    """
     end = datetime.now()
     start = end - timedelta(hours=6)
     request = CryptoBarsRequest(
@@ -151,14 +154,15 @@ async def get_clean_ohlcv_dataframe(symbol):
         logger.warning(f"Insufficient minute bars for {symbol}: {len(bars)} < {SEQUENCE_LEN}")
         return None
 
+    # Build DataFrame with explicit float conversion, None -> 0.0
     data = []
     for b in bars:
         data.append({
             'timestamp': b.timestamp,
-            'open': float(b.open) if b.open is not None else float('nan'),
-            'high': float(b.high) if b.high is not None else float('nan'),
-            'low': float(b.low) if b.low is not None else float('nan'),
-            'close': float(b.close) if b.close is not None else float('nan'),
+            'open': float(b.open) if b.open is not None else 0.0,
+            'high': float(b.high) if b.high is not None else 0.0,
+            'low': float(b.low) if b.low is not None else 0.0,
+            'close': float(b.close) if b.close is not None else 0.0,
             'volume': float(b.volume) if b.volume is not None else 0.0,
         })
     df = pd.DataFrame(data)
@@ -167,6 +171,7 @@ async def get_clean_ohlcv_dataframe(symbol):
     if df.index.tz is not None:
         df.index = df.index.tz_localize(None)
 
+    # Resample to 5 minutes
     ohlc_5 = df.resample('5min').agg({
         'open': 'first',
         'high': 'max',
@@ -175,18 +180,22 @@ async def get_clean_ohlcv_dataframe(symbol):
         'volume': 'sum'
     })
 
-    # Clean price columns: forward fill then backward fill
-    ohlc_5[['open','high','low','close']] = ohlc_5[['open','high','low','close']].ffill().bfill()
-    ohlc_5['volume'] = ohlc_5['volume'].fillna(0.0)
-    ohlc_5.dropna(inplace=True)
+    # Aggressive cleaning: convert each column to float, fill NaN with 0.0, replace inf with 0.0
+    for col in ['open', 'high', 'low', 'close', 'volume']:
+        ohlc_5[col] = ohlc_5[col].astype(float).fillna(0.0).replace([np.inf, -np.inf], 0.0)
+
+    # Additional brute force: replace any remaining None (should be none) with 0.0
+    ohlc_5 = ohlc_5.applymap(lambda x: 0.0 if x is None else x)
 
     if len(ohlc_5) < SEQUENCE_LEN:
         logger.warning(f"Not enough clean 5‑min bars for {symbol}: {len(ohlc_5)}")
         return None
 
+    # Keep only the last SEQUENCE_LEN rows
     ohlc_5 = ohlc_5.iloc[-SEQUENCE_LEN:]
-    # Final safety: replace inf and remaining NaN with 0
-    ohlc_5 = ohlc_5.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+
+    # Final sanity: convert all values to float again
+    ohlc_5 = ohlc_5.astype(float)
     return ohlc_5
 
 async def run_trading_mode(bot_name):
@@ -213,10 +222,15 @@ async def run_trading_mode(bot_name):
                 if df is None:
                     continue
 
+                # Optional: log a sample to verify no None
+                # logger.debug(f"DataFrame for {symbol}:\n{df.head().to_string()}")
+
                 try:
                     signal = predictor.predict(df)
                 except Exception as e:
                     logger.error(f"Prediction error for {symbol}: {e}")
+                    # Optionally, log the DataFrame to debug
+                    # logger.error(f"DataFrame info:\n{df.info()}")
                     continue
 
                 if signal > 0.51:
@@ -244,7 +258,7 @@ async def run_trading_mode(bot_name):
 
                 await asyncio.sleep(2)
 
-            await asyncio.sleep(300)
+            await asyncio.sleep(300)  # scan every 5 minutes
 
         except Exception as e:
             error_msg = f"Main loop error: {e}"
