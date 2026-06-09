@@ -328,7 +328,7 @@ async def run_trading_mode(bot_name):
                     continue
 
                 # 2. Check if we already have an open position (real, not memory)
-                try:
+try:
     # Use the original symbol with slash (e.g., 'BTC/USD')
     position = trading_client.get_position(symbol)
     has_position = True
