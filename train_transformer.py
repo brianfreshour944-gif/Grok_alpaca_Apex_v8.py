@@ -329,13 +329,13 @@ async def run_trading_mode(bot_name):
 
                 # 2. Check if we already have an open position (real, not memory)
                 try:
-                    pos_symbol = get_position_symbol(symbol)
-                    position = trading_client.get_position(pos_symbol)
-                    has_position = True
-                    qty_held = float(position.qty)
-                except Exception:
-                    has_position = False
-                    qty_held = 0.0
+    # Use the original symbol with slash (e.g., 'BTC/USD')
+    position = trading_client.get_position(symbol)
+    has_position = True
+    qty_held = float(position.qty)
+except Exception:
+    has_position = False
+    qty_held = 0.0
 
                 # 3. Get fresh data and signal
                 df = await get_clean_ohlcv_dataframe(symbol)
