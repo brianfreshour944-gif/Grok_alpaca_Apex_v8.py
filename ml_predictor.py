@@ -85,7 +85,7 @@ class GrokGQA_Transformer(nn.Module):
 # MLPredictor (for inference)  --  Loads trained model and scales input
 # ==============================================================================
 
-class MLPredictor:
+class SafeMLPredictor:
     def __init__(
         self, model_path,
         input_dim=len(FEATURE_COLS),  
