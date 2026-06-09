@@ -229,32 +229,34 @@ async def run_trading_mode(bot_name):
                 if time.time() < cooldown_until.get(symbol, 0.0):
                     continue
 
-                # 1. Check if we already hold this symbol (using original format)
+                # ========== FIXED POSITION CHECK ==========
                 has_position = False
                 qty_held = 0.0
                 try:
-                    position = trading_client.get_position(symbol)   # 'BTC/USD' works
+                    # Remove slash for Alpaca's get_position
+                    pos_symbol = symbol.replace("/", "")
+                    position = trading_client.get_position(pos_symbol)
                     if float(position.qty) > 0:
                         has_position = True
                         qty_held = float(position.qty)
                 except Exception:
                     has_position = False
 
-                # 2. Get prediction
+                # Get prediction
                 df = await get_clean_ohlcv_dataframe(symbol)
                 if df is None:
                     continue
                 signal = predictor.predict(df)
                 current_price = df['close'].iloc[-1]
 
-                # 3. SELL logic
+                # SELL logic
                 if has_position and signal < 0.49:
                     logger.info(f"🔻 SELL signal for {symbol} (signal={signal:.3f})")
                     if execute_trade(bot_name, symbol, OrderSide.SELL, qty_held):
                         cooldown_until[symbol] = time.time() + 3600   # 1 hour cooldown
                     continue   # skip buy after sell attempt
 
-                # 4. BUY logic (with portfolio cap)
+                # BUY logic (with portfolio cap)
                 if not has_position and signal > 0.51:
                     # Guardian: check total portfolio value
                     total_value = get_total_portfolio_value()
