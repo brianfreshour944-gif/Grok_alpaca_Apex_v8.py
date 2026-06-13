@@ -1,3 +1,4 @@
+
 #!/usr/bin/env python3
 import asyncio
 import logging
@@ -317,7 +318,7 @@ async def run_trading_mode(bot_name):
                 # --------------------------------------------------
                 # SELL logic
                 # --------------------------------------------------
-                if has_position and signal < 0.49:
+                if has_position and signal < 0.61:
                     logger.info(f"🔻 SELL signal for {symbol} at {current_price:.2f} (signal={signal:.3f})")
                     if execute_trade(bot_name, symbol, OrderSide.SELL, qty_held):
                         cooldown_until[symbol] = now + 3600  # 1-hour cooldown
@@ -326,7 +327,7 @@ async def run_trading_mode(bot_name):
                 # --------------------------------------------------
                 # BUY logic
                 # --------------------------------------------------
-                if not has_position and signal > 0.51:
+                if not has_position and signal > 0.63:
 
                     # Global buy lock for this cycle
                     if not buys_allowed:
