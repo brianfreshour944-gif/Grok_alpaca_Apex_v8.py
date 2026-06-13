@@ -2,7 +2,6 @@
 import asyncio
 import logging
 import os
-import sys
 import time
 import psycopg2
 import pandas as pd
@@ -43,7 +42,7 @@ trading_client = TradingClient(api_key=API_KEY, secret_key=API_SECRET, paper=PAP
 data_client = CryptoHistoricalDataClient()
 cooldown_until = {symbol: 0.0 for symbol in SYMBOLS}
 
-# ---------- SAFE FEATURE ENGINEERING (No None errors) ----------
+# ---------- SAFE FEATURE ENGINEERING ----------
 def safe_add_features(df: pd.DataFrame) -> pd.DataFrame:
     """Calculate all features with aggressive None -> 0 conversion."""
     required = ['open', 'high', 'low', 'close', 'volume']
@@ -94,7 +93,8 @@ def safe_add_features(df: pd.DataFrame) -> pd.DataFrame:
 
     return df[FEATURE_COLS]
 
-# ---------- LOCAL SAFE PREDICTOR (no external dependencies) ----------
+
+# ---------- LOCAL SAFE PREDICTOR ----------
 class SafeMLPredictor:
     def __init__(self, model_path, seq_len=32):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -129,7 +129,6 @@ class SafeMLPredictor:
             df = df.map(lambda x: 0.0 if x is None else x)
 
             df_features = safe_add_features(df)
-
             data = df_features[FEATURE_COLS].tail(self.seq_len).values.astype(np.float32)
             if len(data) < self.seq_len:
                 logger.warning(f"Insufficient rows after feature engineering: {len(data)}")
@@ -146,6 +145,7 @@ class SafeMLPredictor:
             logger.error(f"Prediction error: {e}")
             return 0.5
 
+
 # ---------- HELPER FUNCTIONS ----------
 def get_total_portfolio_value():
     """Returns the total dollar value of all crypto positions."""
@@ -154,18 +154,48 @@ def get_total_portfolio_value():
         return sum(float(p.market_value) for p in positions)
     except Exception as e:
         logger.error(f"Error fetching portfolio value: {e}")
-        return None   # Instead of 999999, return None to indicate failure
+        return None
+
+
+def sell_largest_position():
+    """
+    Finds and sells the largest position by market value.
+    Returns True if a sell was placed, False otherwise.
+    """
+    try:
+        positions = trading_client.get_all_positions()
+        if not positions:
+            return False
+        largest = max(positions, key=lambda p: float(p.market_value))
+        symbol_to_sell = largest.symbol
+        qty_to_sell = float(largest.qty)
+        logger.warning(
+            f"📉 Portfolio over cap. Selling largest position: "
+            f"{symbol_to_sell} qty={qty_to_sell:.6f} (${float(largest.market_value):.2f})"
+        )
+        execute_trade(BOT_NAME, symbol_to_sell, OrderSide.SELL, qty_to_sell)
+        return True
+    except Exception as e:
+        logger.error(f"Error in sell_largest_position: {e}")
+        return False
+
 
 def execute_trade(bot_name, symbol, side, qty):
     try:
         order = trading_client.submit_order(
-            order_data=MarketOrderRequest(symbol=symbol, qty=qty, side=side, time_in_force=TimeInForce.GTC)
+            order_data=MarketOrderRequest(
+                symbol=symbol, qty=qty, side=side, time_in_force=TimeInForce.GTC
+            )
         )
-        logger.info(f"✅ Placed {side.value} order for {symbol} | Qty: {qty:.6f} | Order ID: {order.id}")
+        logger.info(
+            f"✅ Placed {side.value} order for {symbol} | "
+            f"Qty: {qty:.6f} | Order ID: {order.id}"
+        )
         return order
     except Exception as e:
         logger.error(f"Trade execution failed for {symbol}: {e}")
         return None
+
 
 async def get_clean_ohlcv_dataframe(symbol):
     """Fetch 5-min OHLCV data for the last 6 hours."""
@@ -187,10 +217,10 @@ async def get_clean_ohlcv_dataframe(symbol):
     for b in bars:
         data.append({
             'timestamp': b.timestamp,
-            'open': float(b.open) if b.open is not None else 0.0,
-            'high': float(b.high) if b.high is not None else 0.0,
-            'low': float(b.low) if b.low is not None else 0.0,
-            'close': float(b.close) if b.close is not None else 0.0,
+            'open':   float(b.open)   if b.open   is not None else 0.0,
+            'high':   float(b.high)   if b.high   is not None else 0.0,
+            'low':    float(b.low)    if b.low    is not None else 0.0,
+            'close':  float(b.close)  if b.close  is not None else 0.0,
             'volume': float(b.volume) if b.volume is not None else 0.0,
         })
     df = pd.DataFrame(data)
@@ -200,10 +230,10 @@ async def get_clean_ohlcv_dataframe(symbol):
         df.index = df.index.tz_localize(None)
 
     ohlc_5 = df.resample('5min').agg({
-        'open': 'first',
-        'high': 'max',
-        'low': 'min',
-        'close': 'last',
+        'open':   'first',
+        'high':   'max',
+        'low':    'min',
+        'close':  'last',
         'volume': 'sum'
     })
 
@@ -217,6 +247,7 @@ async def get_clean_ohlcv_dataframe(symbol):
 
     return ohlc_5.iloc[-SEQUENCE_LEN:].astype(float)
 
+
 # --- MAIN TRADING LOOP ---
 async def run_trading_mode(bot_name):
     global cooldown_until
@@ -225,15 +256,52 @@ async def run_trading_mode(bot_name):
 
     while True:
         try:
+            # =====================================================
+            # STEP 1: Portfolio cap enforcement — runs ONCE per
+            # cycle, before evaluating any symbol.  All buys are
+            # blocked until the portfolio is back under the cap.
+            # =====================================================
+            buys_allowed = True
+            total_value = get_total_portfolio_value()
+
+            if total_value is None:
+                logger.warning("Could not fetch portfolio value — skipping entire cycle.")
+                await asyncio.sleep(30)
+                continue
+
+            if total_value >= MAX_PORTFOLIO_VALUE:
+                logger.warning(
+                    f"📉 Portfolio at/over cap (${total_value:.2f} >= ${MAX_PORTFOLIO_VALUE:.2f}). "
+                    f"Selling largest position before evaluating buys."
+                )
+                sell_largest_position()
+                # Block ALL buys this cycle so the sell can settle
+                buys_allowed = False
+
+            # =====================================================
+            # STEP 2: Evaluate each symbol for signals
+            # =====================================================
             for symbol in SYMBOLS:
-                if time.time() < cooldown_until.get(symbol, 0.0):
+                now = time.time()
+
+                # Per-symbol cooldown check
+                if now < cooldown_until.get(symbol, 0.0):
+                    remaining = cooldown_until[symbol] - now
+                    logger.debug(f"⏳ {symbol} in cooldown ({remaining:.0f}s remaining)")
                     continue
 
-                # ========== FIXED POSITION CHECK ==========
+                # Fetch OHLCV data and run prediction
+                df = await get_clean_ohlcv_dataframe(symbol)
+                if df is None:
+                    continue
+
+                signal = predictor.predict(df)
+                current_price = df['close'].iloc[-1]
+
+                # Check current position
                 has_position = False
                 qty_held = 0.0
                 try:
-                    # Remove slash for Alpaca's get_position
                     pos_symbol = symbol.replace("/", "")
                     position = trading_client.get_position(pos_symbol)
                     if float(position.qty) > 0:
@@ -242,56 +310,68 @@ async def run_trading_mode(bot_name):
                 except Exception:
                     has_position = False
 
-                # Get prediction
-                df = await get_clean_ohlcv_dataframe(symbol)
-                if df is None:
-                    continue
-                signal = predictor.predict(df)
-                current_price = df['close'].iloc[-1]
-
+                # --------------------------------------------------
                 # SELL logic
+                # --------------------------------------------------
                 if has_position and signal < 0.49:
-                    logger.info(f"🔻 SELL signal for {symbol} (signal={signal:.3f})")
+                    logger.info(f"🔻 SELL signal for {symbol} at {current_price:.2f} (signal={signal:.3f})")
                     if execute_trade(bot_name, symbol, OrderSide.SELL, qty_held):
-                        cooldown_until[symbol] = time.time() + 3600   # 1 hour cooldown
-                    continue   # skip buy after sell attempt
+                        # 1-hour cooldown after a voluntary sell
+                        cooldown_until[symbol] = now + 3600
+                    continue  # Never buy on the same tick we just sold
 
-                # BUY logic (with portfolio cap)
+                # --------------------------------------------------
+                # BUY logic
+                # --------------------------------------------------
                 if not has_position and signal > 0.51:
-                    # Guardian: check total portfolio value
-                    total_value = get_total_portfolio_value()
-                    if total_value is None:
-                        logger.warning("Could not fetch portfolio value, skipping BUY")
+
+                    # Global buy lock — enforced for the entire cycle
+                    if not buys_allowed:
+                        logger.info(
+                            f"🚫 BUY suppressed for {symbol} this cycle "
+                            f"(portfolio cap enforcement in progress)"
+                        )
                         continue
 
-                    # If portfolio exceeds cap by 5%, sell the largest position
-                    if total_value > MAX_PORTFOLIO_VALUE * 1.05:
-                        positions = trading_client.get_all_positions()
-                        if positions:
-                            largest = max(positions, key=lambda p: float(p.market_value))
-                            symbol_to_sell = largest.symbol
-                            qty_to_sell = float(largest.qty)
-                            logger.warning(f"📉 Portfolio over cap (${total_value:.2f} >= ${MAX_PORTFOLIO_VALUE}). Selling {symbol_to_sell}")
-                            execute_trade(bot_name, symbol_to_sell, OrderSide.SELL, qty_to_sell)
-                        continue  # skip buy this cycle
+                    # Re-check portfolio value right before buying
+                    # (another buy earlier in this loop may have changed it)
+                    fresh_value = get_total_portfolio_value()
+                    if fresh_value is None:
+                        logger.warning(f"Could not verify portfolio value before buying {symbol}. Skipping.")
+                        continue
+
+                    if fresh_value >= MAX_PORTFOLIO_VALUE:
+                        logger.warning(
+                            f"🚫 BUY blocked for {symbol}: portfolio ${fresh_value:.2f} "
+                            f">= cap ${MAX_PORTFOLIO_VALUE:.2f}"
+                        )
+                        buys_allowed = False   # Block remaining symbols this cycle too
+                        continue
 
                     qty = ORDER_AMOUNT / current_price
                     trade_value = qty * current_price
+
                     if trade_value > MAX_SINGLE_TRADE_USD:
-                        logger.error(f"❌ Trade too large (${trade_value:.2f} > ${MAX_SINGLE_TRADE_USD}). Aborting BUY for {symbol}")
+                        logger.error(
+                            f"❌ Trade too large (${trade_value:.2f} > ${MAX_SINGLE_TRADE_USD:.2f}). "
+                            f"Aborting BUY for {symbol}"
+                        )
                         continue
 
                     logger.info(f"🎯 BUY signal for {symbol} at {current_price:.2f} (signal={signal:.3f})")
                     if execute_trade(bot_name, symbol, OrderSide.BUY, qty):
-                        cooldown_until[symbol] = time.time() + 600   # 10 min cooldown
+                        # 10-minute cooldown after a buy
+                        cooldown_until[symbol] = now + 600
 
-                await asyncio.sleep(2)
+                await asyncio.sleep(2)  # Small pause between symbol evaluations
 
-            await asyncio.sleep(60)   # full cycle every minute
+            # Full cycle pause
+            await asyncio.sleep(60)
 
         except Exception as e:
             logger.error(f"Main loop error: {e}")
             await asyncio.sleep(30)
+
 
 if __name__ == "__main__":
     asyncio.run(run_trading_mode(BOT_NAME))
