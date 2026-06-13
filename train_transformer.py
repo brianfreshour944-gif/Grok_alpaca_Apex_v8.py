@@ -260,9 +260,18 @@ async def run_trading_mode(bot_name):
                 if not has_position and signal > 0.51:
                     # Guardian: check total portfolio value
                     total_value = get_total_portfolio_value()
-                    if total_value >= MAX_PORTFOLIO_VALUE:
-                        logger.warning(f"⚠️ Portfolio cap reached (${total_value:.2f} >= ${MAX_PORTFOLIO_VALUE}). Skipping BUY for {symbol}")
-                        continue
+                    # After checking total_value before buying, add:
+if total_value > MAX_PORTFOLIO_VALUE * 1.05:   # 5% buffer
+    # Sell the largest position (or proportional amount)
+    positions = trading_client.get_all_positions()
+    if positions:
+        # Sort by market value descending
+        largest = max(positions, key=lambda p: float(p.market_value))
+        symbol_to_sell = largest.symbol
+        qty = float(largest.qty)
+        logger.warning(f"📉 Portfolio over cap (${total_value:.2f}). Selling {symbol_to_sell}")
+        execute_trade(bot_name, symbol_to_sell, OrderSide.SELL, qty)
+        continue  # skip other actions this cycle
 
                     qty = ORDER_AMOUNT / current_price
                     trade_value = qty * current_price
