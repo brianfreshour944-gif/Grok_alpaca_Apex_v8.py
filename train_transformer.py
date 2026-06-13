@@ -154,7 +154,7 @@ def get_total_portfolio_value():
         return sum(float(p.market_value) for p in positions)
     except Exception as e:
         logger.error(f"Error fetching portfolio value: {e}")
-        return 999999.0  # Fail-safe: block new buys
+        return None   # Instead of 999999, return None to indicate failure
 
 def execute_trade(bot_name, symbol, side, qty):
     try:
@@ -260,18 +260,20 @@ async def run_trading_mode(bot_name):
                 if not has_position and signal > 0.51:
                     # Guardian: check total portfolio value
                     total_value = get_total_portfolio_value()
-                    # After checking total_value before buying, add:
-if total_value > MAX_PORTFOLIO_VALUE * 1.05:   # 5% buffer
-    # Sell the largest position (or proportional amount)
-    positions = trading_client.get_all_positions()
-    if positions:
-        # Sort by market value descending
-        largest = max(positions, key=lambda p: float(p.market_value))
-        symbol_to_sell = largest.symbol
-        qty = float(largest.qty)
-        logger.warning(f"📉 Portfolio over cap (${total_value:.2f}). Selling {symbol_to_sell}")
-        execute_trade(bot_name, symbol_to_sell, OrderSide.SELL, qty)
-        continue  # skip other actions this cycle
+                    if total_value is None:
+                        logger.warning("Could not fetch portfolio value, skipping BUY")
+                        continue
+
+                    # If portfolio exceeds cap by 5%, sell the largest position
+                    if total_value > MAX_PORTFOLIO_VALUE * 1.05:
+                        positions = trading_client.get_all_positions()
+                        if positions:
+                            largest = max(positions, key=lambda p: float(p.market_value))
+                            symbol_to_sell = largest.symbol
+                            qty_to_sell = float(largest.qty)
+                            logger.warning(f"📉 Portfolio over cap (${total_value:.2f} >= ${MAX_PORTFOLIO_VALUE}). Selling {symbol_to_sell}")
+                            execute_trade(bot_name, symbol_to_sell, OrderSide.SELL, qty_to_sell)
+                        continue  # skip buy this cycle
 
                     qty = ORDER_AMOUNT / current_price
                     trade_value = qty * current_price
