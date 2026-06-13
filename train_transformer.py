@@ -1,4 +1,3 @@
-
 #!/usr/bin/env python3
 import asyncio
 import logging
@@ -42,6 +41,7 @@ PAPER = os.getenv("APCA_API_PAPER", "true").lower() == "true"
 trading_client = TradingClient(api_key=API_KEY, secret_key=API_SECRET, paper=PAPER)
 data_client = CryptoHistoricalDataClient()
 cooldown_until = {symbol: 0.0 for symbol in SYMBOLS}
+
 
 # ---------- SAFE FEATURE ENGINEERING ----------
 def safe_add_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -258,9 +258,9 @@ async def run_trading_mode(bot_name):
     while True:
         try:
             # =====================================================
-            # STEP 1: Portfolio cap enforcement — runs ONCE per
-            # cycle, before evaluating any symbol.  All buys are
-            # blocked until the portfolio is back under the cap.
+            # STEP 1: Fetch real portfolio value once per cycle.
+            # If already at/over cap, sell the largest position
+            # and skip ALL buys this cycle so the sell can settle.
             # =====================================================
             buys_allowed = True
             total_value = get_total_portfolio_value()
@@ -270,9 +270,8 @@ async def run_trading_mode(bot_name):
                 await asyncio.sleep(30)
                 continue
 
-            # Track estimated portfolio value as buys accumulate this cycle.
-            # Starts at the real fetched value and is incremented after each buy,
-            # so we don't need an extra API call per symbol to stay under the cap.
+            # running_portfolio_value tracks spend within this cycle
+            # without needing extra API calls between symbols.
             running_portfolio_value = total_value
 
             if total_value >= MAX_PORTFOLIO_VALUE:
@@ -281,11 +280,10 @@ async def run_trading_mode(bot_name):
                     f"Selling largest position before evaluating buys."
                 )
                 sell_largest_position()
-                # Block ALL buys this cycle so the sell can settle
-                buys_allowed = False
+                buys_allowed = False  # block ALL buys this cycle
 
             # =====================================================
-            # STEP 2: Evaluate each symbol for signals
+            # STEP 2: Evaluate each symbol for signals.
             # =====================================================
             for symbol in SYMBOLS:
                 now = time.time()
@@ -322,17 +320,15 @@ async def run_trading_mode(bot_name):
                 if has_position and signal < 0.49:
                     logger.info(f"🔻 SELL signal for {symbol} at {current_price:.2f} (signal={signal:.3f})")
                     if execute_trade(bot_name, symbol, OrderSide.SELL, qty_held):
-                        # 1-hour cooldown after a voluntary sell
-                        cooldown_until[symbol] = now + 3600
-                    continue  # Never buy on the same tick we just sold
+                        cooldown_until[symbol] = now + 3600  # 1-hour cooldown
+                    continue  # never buy on the same tick we just sold
 
                 # --------------------------------------------------
                 # BUY logic
                 # --------------------------------------------------
                 if not has_position and signal > 0.51:
 
-                    # Global buy lock — set at cycle start if over cap,
-                    # or set dynamically after a buy pushes us to/over cap
+                    # Global buy lock for this cycle
                     if not buys_allowed:
                         logger.info(
                             f"🚫 BUY suppressed for {symbol} this cycle "
@@ -340,9 +336,8 @@ async def run_trading_mode(bot_name):
                         )
                         continue
 
-                    # How much would this order cost?
                     qty = ORDER_AMOUNT / current_price
-                    trade_value = qty * current_price
+                    trade_value = qty * current_price  # should equal ORDER_AMOUNT
 
                     if trade_value > MAX_SINGLE_TRADE_USD:
                         logger.error(
@@ -351,14 +346,14 @@ async def run_trading_mode(bot_name):
                         )
                         continue
 
-                    # Would this order push us over the cap?
-                    # Use running_portfolio_value so we don't need an extra API call
-                    # every iteration — it's updated after each successful buy.
-                    if running_portfolio_value + trade_value >= MAX_PORTFOLIO_VALUE:
+                    # KEY FIX: check headroom BEFORE placing the order.
+                    # If there isn't enough room for a full ORDER_AMOUNT buy,
+                    # block this and all remaining buys this cycle.
+                    headroom = MAX_PORTFOLIO_VALUE - running_portfolio_value
+                    if headroom < ORDER_AMOUNT:
                         logger.warning(
-                            f"🚫 BUY blocked for {symbol}: estimated portfolio "
-                            f"${running_portfolio_value + trade_value:.2f} would exceed "
-                            f"cap ${MAX_PORTFOLIO_VALUE:.2f}"
+                            f"🚫 BUY blocked for {symbol}: only ${headroom:.2f} headroom "
+                            f"remaining (need ${ORDER_AMOUNT:.2f}). Locking buys for cycle."
                         )
                         buys_allowed = False
                         continue
@@ -367,15 +362,16 @@ async def run_trading_mode(bot_name):
                     if execute_trade(bot_name, symbol, OrderSide.BUY, qty):
                         cooldown_until[symbol] = now + 600   # 10-minute cooldown
                         running_portfolio_value += trade_value
-                        # Lock further buys if we're now at/over cap
-                        if running_portfolio_value >= MAX_PORTFOLIO_VALUE:
+                        # Lock further buys if headroom is now exhausted
+                        if MAX_PORTFOLIO_VALUE - running_portfolio_value < ORDER_AMOUNT:
                             logger.info(
-                                f"🔒 Portfolio cap reached (estimated ${running_portfolio_value:.2f}). "
+                                f"🔒 Insufficient headroom after buy "
+                                f"(${MAX_PORTFOLIO_VALUE - running_portfolio_value:.2f} remaining). "
                                 f"No more buys this cycle."
                             )
                             buys_allowed = False
 
-                await asyncio.sleep(2)  # Small pause between symbol evaluations
+                await asyncio.sleep(2)  # small pause between symbol evaluations
 
             # Full cycle pause
             await asyncio.sleep(60)
