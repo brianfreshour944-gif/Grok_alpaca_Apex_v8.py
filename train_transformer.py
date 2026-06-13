@@ -1,3 +1,4 @@
+
 #!/usr/bin/env python3
 import asyncio
 import logging
@@ -269,6 +270,11 @@ async def run_trading_mode(bot_name):
                 await asyncio.sleep(30)
                 continue
 
+            # Track estimated portfolio value as buys accumulate this cycle.
+            # Starts at the real fetched value and is incremented after each buy,
+            # so we don't need an extra API call per symbol to stay under the cap.
+            running_portfolio_value = total_value
+
             if total_value >= MAX_PORTFOLIO_VALUE:
                 logger.warning(
                     f"📉 Portfolio at/over cap (${total_value:.2f} >= ${MAX_PORTFOLIO_VALUE:.2f}). "
@@ -325,7 +331,8 @@ async def run_trading_mode(bot_name):
                 # --------------------------------------------------
                 if not has_position and signal > 0.51:
 
-                    # Global buy lock — enforced for the entire cycle
+                    # Global buy lock — set at cycle start if over cap,
+                    # or set dynamically after a buy pushes us to/over cap
                     if not buys_allowed:
                         logger.info(
                             f"🚫 BUY suppressed for {symbol} this cycle "
@@ -333,21 +340,7 @@ async def run_trading_mode(bot_name):
                         )
                         continue
 
-                    # Re-check portfolio value right before buying
-                    # (another buy earlier in this loop may have changed it)
-                    fresh_value = get_total_portfolio_value()
-                    if fresh_value is None:
-                        logger.warning(f"Could not verify portfolio value before buying {symbol}. Skipping.")
-                        continue
-
-                    if fresh_value >= MAX_PORTFOLIO_VALUE:
-                        logger.warning(
-                            f"🚫 BUY blocked for {symbol}: portfolio ${fresh_value:.2f} "
-                            f">= cap ${MAX_PORTFOLIO_VALUE:.2f}"
-                        )
-                        buys_allowed = False   # Block remaining symbols this cycle too
-                        continue
-
+                    # How much would this order cost?
                     qty = ORDER_AMOUNT / current_price
                     trade_value = qty * current_price
 
@@ -358,10 +351,29 @@ async def run_trading_mode(bot_name):
                         )
                         continue
 
+                    # Would this order push us over the cap?
+                    # Use running_portfolio_value so we don't need an extra API call
+                    # every iteration — it's updated after each successful buy.
+                    if running_portfolio_value + trade_value >= MAX_PORTFOLIO_VALUE:
+                        logger.warning(
+                            f"🚫 BUY blocked for {symbol}: estimated portfolio "
+                            f"${running_portfolio_value + trade_value:.2f} would exceed "
+                            f"cap ${MAX_PORTFOLIO_VALUE:.2f}"
+                        )
+                        buys_allowed = False
+                        continue
+
                     logger.info(f"🎯 BUY signal for {symbol} at {current_price:.2f} (signal={signal:.3f})")
                     if execute_trade(bot_name, symbol, OrderSide.BUY, qty):
-                        # 10-minute cooldown after a buy
-                        cooldown_until[symbol] = now + 600
+                        cooldown_until[symbol] = now + 600   # 10-minute cooldown
+                        running_portfolio_value += trade_value
+                        # Lock further buys if we're now at/over cap
+                        if running_portfolio_value >= MAX_PORTFOLIO_VALUE:
+                            logger.info(
+                                f"🔒 Portfolio cap reached (estimated ${running_portfolio_value:.2f}). "
+                                f"No more buys this cycle."
+                            )
+                            buys_allowed = False
 
                 await asyncio.sleep(2)  # Small pause between symbol evaluations
 
