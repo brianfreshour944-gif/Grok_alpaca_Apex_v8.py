@@ -121,6 +121,26 @@ GBT_CHALLENGER_PATH = os.getenv("GBT_CHALLENGER_PATH", "gbt_challenger.joblib")
 # on identical targets.
 GBT_HORIZON_BARS    = int(os.getenv("GBT_HORIZON_BARS", "6"))
 
+# ── Walk-forward retraining & drift detection ──────────────────────────────────
+RETRAIN_DIR = os.getenv("RETRAIN_DIR", "retrained_models")
+DRIFT_STATE_PATH = os.getenv("DRIFT_STATE_PATH", "drift_state.json")
+PROMOTION_STATE_PATH = os.getenv("PROMOTION_STATE_PATH", "promotion_state.json")
+MODEL_BACKUP_DIR = os.getenv("MODEL_BACKUP_DIR", "model_backups")
+
+# Drift detection thresholds
+DRIFT_ACCURACY_FLOOR = float(os.getenv("DRIFT_ACCURACY_FLOOR", "0.45"))
+DRIFT_WIN_RATE_FLOOR = float(os.getenv("DRIFT_WIN_RATE_FLOOR", "0.40"))
+DRIFT_SHARPE_FLOOR = float(os.getenv("DRIFT_SHARPE_FLOOR", "0.5"))
+DRIFT_CONSECUTIVE_LOSSES = int(os.getenv("DRIFT_CONSECUTIVE_LOSSES", "5"))
+DRIFT_ALERT_COOLDOWN_HOURS = int(os.getenv("DRIFT_ALERT_COOLDOWN_HOURS", "6"))
+
+# Promotion gate thresholds
+PROMOTION_MIN_IMPROVEMENT = float(os.getenv("PROMOTION_MIN_IMPROVEMENT", "0.02"))
+PROMOTION_MIN_ACCURACY = float(os.getenv("PROMOTION_MIN_ACCURACY", "0.50"))
+PROMOTION_MIN_F1 = float(os.getenv("PROMOTION_MIN_F1", "0.45"))
+PROMOTION_DEMOTE_ACCURACY = float(os.getenv("PROMOTION_DEMOTE_ACCURACY", "0.42"))
+PROMOTION_DEMOTE_F1 = float(os.getenv("PROMOTION_DEMOTE_F1", "0.38"))
+
 # ── Regime-adaptive thresholds ─────────────────────────────────────────────────
 # NOTE: buy/sell signals are anchored to BUY_SIGNAL / SELL_SIGNAL so that
 # lowering BUY_SIGNAL (e.g. 0.62 -> 0.51 for diagnostics) takes effect in
