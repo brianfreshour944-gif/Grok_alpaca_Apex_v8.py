@@ -131,6 +131,7 @@ class SafeMLPredictor:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model_path = model_path
         self.seq_len = seq_len
+        self.input_dim = input_dim
         self._torch_kwargs = dict(
             input_dim=input_dim, seq_len=seq_len, embed_dim=embed_dim,
             num_layers=num_layers, num_q_heads=num_q_heads,
@@ -141,6 +142,10 @@ class SafeMLPredictor:
         # vector the model actually saw, consumed by experience_capture.py
         # (step 0) so training/promotion tools have real labeled data.
         self.last_features: dict = {}
+
+        # Feature importance tracking: {symbol: {feature_col: importance_score}}
+        # Computed via integrated gradients approximation (gradient * input).
+        self.last_feature_importance: dict = {}
 
         self._kind = None      # "torch" | "sklearn"
         self.model = None      # torch module (kind == "torch")
@@ -314,6 +319,10 @@ class SafeMLPredictor:
                 if symbol in symbols_in_order:
                     idx = symbols_in_order.index(symbol)
                     result[symbol] = float(preds[idx].item())
+                    # Compute feature importance for this prediction
+                    importance = self.compute_feature_importance(symbol)
+                    if importance:
+                        self.last_feature_importance[symbol] = importance
                 else:
                     result[symbol] = processed.get(symbol, 0.5)
 
@@ -347,3 +356,57 @@ class SafeMLPredictor:
                 print(f"Sklearn champion predict error for {symbol}: {e}")
                 result[symbol] = 0.5
         return result
+
+    def compute_feature_importance(self, symbol: str) -> dict | None:
+        """
+        Compute feature importance for the last prediction using integrated
+        gradients approximation. Returns {feature_col: importance_score} or None.
+
+        Importance = |gradient * input| averaged across sequence positions.
+        Higher absolute value = more influence on prediction.
+        """
+        if self._kind != "torch" or self.model is None:
+            return None
+
+        features = self.last_features.get(symbol)
+        if not features:
+            return None
+
+        try:
+            # Get the last feature row (raw, unscaled)
+            feat_values = torch.tensor(
+                [features.get(col, 0.0) for col in FEATURE_COLS],
+                dtype=torch.float32,
+            ).to(self.device)
+
+            # Enable gradient computation
+            feat_values.requires_grad_(True)
+
+            # Forward pass with gradient tracking
+            # Reshape to (1, seq_len, features) - use same value for all positions
+            input_tensor = feat_values.unsqueeze(0).unsqueeze(0).expand(1, self.seq_len, -1)
+
+            output = self.model(input_tensor)
+            prediction = torch.sigmoid(output).squeeze()
+
+            # Backward pass to get gradients
+            self.model.zero_grad()
+            prediction.backward()
+
+            # Compute importance as gradient * input (integrated gradients approx)
+            grads = feat_values.grad.detach()
+            importance = (grads * feat_values).abs().detach().cpu().numpy()
+
+            # Normalize to sum to 1
+            total = importance.sum()
+            if total > 0:
+                importance = importance / total
+
+            return {
+                FEATURE_COLS[i]: float(importance[i])
+                for i in range(len(FEATURE_COLS))
+            }
+
+        except Exception as e:
+            # Feature importance is best-effort - never fail trading
+            return None

@@ -21,6 +21,7 @@ import numpy as np
 
 from config import logger, DISCORD_WEBHOOK_URL, EXPERIENCE_LOG_PATH
 from experience_capture import load_experiences
+from feature_engineering import FEATURE_COLS
 
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -100,12 +101,19 @@ def analyze_recent_performance(days: int = 7) -> dict:
     signals = []
     outcomes = []
     regimes = []
+    feature_series = {col: [] for col in FEATURE_COLS}
 
     for entry in entries:
         symbol = entry.get("symbol", "")
         signal = entry.get("signal", 0.5)
         entry_ts = entry.get("ts", "")
         regime = entry.get("regime", "unknown")
+        features = entry.get("features", {})
+
+        # Collect feature values
+        for col in FEATURE_COLS:
+            if col in features:
+                feature_series[col].append(features[col])
 
         # Find matching exit
         for exit_ev in exits:
@@ -149,6 +157,29 @@ def analyze_recent_performance(days: int = 7) -> dict:
     for r in regimes:
         regime_dist[r] = regime_dist.get(r, 0) + 1
 
+    # Feature degradation analysis
+    feature_degradation = {}
+    for col in FEATURE_COLS:
+        values = feature_series.get(col, [])
+        if len(values) > 10:
+            arr = np.array(values)
+            # Check if feature has become degenerate (low variance)
+            variance = arr.var()
+            # Check if feature is drifting (mean far from 0 for Z-scored features)
+            mean_drift = abs(arr.mean())
+            # Check for extreme values
+            extreme_pct = ((arr < -3) | (arr > 3)).mean() * 100
+            
+            feature_degradation[col] = {
+                "variance": round(float(variance), 6),
+                "mean_drift": round(float(mean_drift), 4),
+                "extreme_pct": round(float(extreme_pct), 2),
+                "n_samples": len(values),
+                "is_degenerate": variance < 0.01,
+                "is_drifting": mean_drift > 1.0,
+                "has_extremes": extreme_pct > 5.0,
+            }
+
     # Drift score: 0 = no drift, 1 = severe drift
     drift_score = 0.0
     drift_signals = []
@@ -169,6 +200,17 @@ def analyze_recent_performance(days: int = 7) -> dict:
         drift_score += 0.2
         drift_signals.append(f"Consecutive losses: {max_consecutive_losses}")
 
+    # Check for feature degradation
+    degenerate_features = [col for col, stats in feature_degradation.items() if stats.get("is_degenerate")]
+    drifting_features = [col for col, stats in feature_degradation.items() if stats.get("is_drifting")]
+    
+    if degenerate_features:
+        drift_score += 0.2
+        drift_signals.append(f"Degenerate features: {', '.join(degenerate_features)}")
+    if drifting_features:
+        drift_score += 0.1
+        drift_signals.append(f"Drifting features: {', '.join(drifting_features)}")
+
     return {
         "period_days": days,
         "entries": len(entries),
@@ -183,6 +225,7 @@ def analyze_recent_performance(days: int = 7) -> dict:
         "drift_score": min(drift_score, 1.0),
         "drift_signals": drift_signals,
         "is_drifting": drift_score > 0.5,
+        "feature_degradation": feature_degradation,
     }
 
 

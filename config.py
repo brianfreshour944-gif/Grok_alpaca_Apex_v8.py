@@ -50,6 +50,13 @@ SYMBOLS = [
 # data_feeds.scan_stable_assets()'s full 24-symbol candidate list, because
 # feature_scaler.pkl was only fit on these symbols' feature distributions;
 # trading an asset the scaler never saw risks out-of-distribution inputs.
+#
+# NOTE: This introduces SURVIVORSHIP BIAS -- these symbols were chosen
+# because they existed and performed well during training. To mitigate:
+# 1. Periodically review and update this list
+# 2. Add new promising symbols as they emerge
+# 3. Remove symbols that no longer have sufficient liquidity
+# 4. When retraining, include symbols that failed (if data available)
 DYNAMIC_UNIVERSE_CANDIDATES = [
     "BTC/USD", "ETH/USD", "SOL/USD", "DOGE/USD",
     "LTC/USD", "AVAX/USD", "LINK/USD", "ADA/USD",

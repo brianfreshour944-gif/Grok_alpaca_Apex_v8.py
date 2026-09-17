@@ -143,12 +143,18 @@ def add_features(df: pd.DataFrame) -> pd.DataFrame:
     )
     d["vwap"] = d["vwap"].where(d["vwap"] > 0, d["close"])  # replace zeros
 
-    # trade_count falls back to 1 to avoid division-by-zero in trade_size_proxy
-    d["trade_count"] = _sanitize(
+    # trade_count: Alpaca may return 0 or missing trade_count. When trade_count
+    # is unavailable (falls back to 1), trade_size_proxy becomes pure noise
+    # (equals volume). We mark these rows with a flag so the model can learn
+    # to discount this feature when trade_count is unreliable.
+    tc_raw = _sanitize(
         d["trade_count"] if "trade_count" in d.columns
-        else pd.Series(1.0, index=d.index),
-        fill=1.0,
-    ).replace(0.0, 1.0)  # guarantee non-zero denominator
+        else pd.Series(0.0, index=d.index),  # 0 = missing
+        fill=0.0,
+    )
+    # When trade_count is 0 or 1 (likely fallback), mark as unreliable
+    tc_is_reliable = (tc_raw > 1).astype(float)
+    d["trade_count"] = tc_raw.replace(0.0, 1.0)  # safe denominator
 
     close  = d["close"]
     high   = d["high"]
@@ -228,8 +234,12 @@ def add_features(df: pd.DataFrame) -> pd.DataFrame:
     # Average trade size = volume / trade_count.
     # Large avg trade  -> institutional block flow.
     # Small avg trade  -> retail limit-order churn.
-    # Z-scored over 20 bars.
-    trade_size_raw = _sanitize(volume / tc, fill=0.0)
+    # When trade_count is unreliable (<=1), use volume directly as a proxy
+    # for activity level rather than the noisy volume/trade_count ratio.
+    trade_size_raw = _sanitize(
+        np.where(tc_is_reliable > 0.5, volume / tc_raw, volume),
+        fill=0.0,
+    )
     d["trade_size_proxy"] = _z_score(trade_size_raw, window=20, fill=0.0)
 
     # ── Feature 10: roll_autocorr ─────────────────────────────────────────────

@@ -75,7 +75,8 @@ def _append_event(event: dict) -> bool:
 def log_entry_experience(symbol: str, *, signal: float, regime: str, trend: str,
                          atr_pct: float, price: float, qty: float,
                          trade_value: float, features: dict | None,
-                         order_id: str | None = None, ts: float | None = None) -> bool:
+                         order_id: str | None = None, ts: float | None = None,
+                         feature_importance: dict | None = None) -> bool:
     """Record the decision-time context + feature vector for a BUY."""
     ev = {
         "schema": 1,
@@ -91,6 +92,7 @@ def log_entry_experience(symbol: str, *, signal: float, regime: str, trend: str,
         "trade_value": round(float(trade_value), 2),
         "order_id": order_id,
         "features": {k: float(v) for k, v in (features or {}).items()},
+        "feature_importance": {k: round(float(v), 6) for k, v in (feature_importance or {}).items()},
     }
     ok = _append_event(ev)
     if ok:

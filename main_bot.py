@@ -11,6 +11,7 @@ import time
 sys.stdout.reconfigure(encoding='utf-8')
 sys.stderr.reconfigure(encoding='utf-8')
 
+import numpy as np
 import psycopg2
 
 from alpaca.trading.enums import OrderSide
@@ -44,6 +45,51 @@ from ml_predictor import SafeMLPredictor
 from money import mul, div, qty as money_qty
 from experience_capture import log_entry_experience, log_exit_outcome, log_shadow_prediction
 from shadow_model import get_shadow_gbt
+
+
+# ── Signal Latency Tracker ────────────────────────────────────────────────────
+class SignalLatencyTracker:
+    """Tracks latency from bar close to order submission."""
+
+    def __init__(self):
+        self.latencies: list[float] = []
+        self._bar_close_times: dict[str, float] = {}
+
+    def record_bar_close(self, symbol: str, bar_timestamp):
+        """Record when a bar closed (for latency measurement)."""
+        try:
+            if hasattr(bar_timestamp, 'timestamp'):
+                self._bar_close_times[symbol] = bar_timestamp.timestamp()
+            else:
+                self._bar_close_times[symbol] = float(bar_timestamp)
+        except Exception:
+            pass
+
+    def record_order_submission(self, symbol: str) -> float | None:
+        """Record when order was submitted, return latency in seconds."""
+        bar_close = self._bar_close_times.pop(symbol, None)
+        if bar_close is None:
+            return None
+        latency = time.time() - bar_close
+        self.latencies.append(latency)
+        if len(self.latencies) > 1000:
+            self.latencies = self.latencies[-500:]
+        return latency
+
+    def get_stats(self) -> dict:
+        """Get latency statistics."""
+        if not self.latencies:
+            return {"count": 0, "mean": 0, "p50": 0, "p95": 0, "max": 0}
+        arr = np.array(self.latencies)
+        return {
+            "count": len(arr),
+            "mean": float(arr.mean()),
+            "p50": float(np.percentile(arr, 50)),
+            "p95": float(np.percentile(arr, 95)),
+            "max": float(arr.max()),
+        }
+
+latency_tracker = SignalLatencyTracker()
 
 
 # ── CircuitBreaker ───────────────────────────────────────────────────────
@@ -387,11 +433,14 @@ async def run_trading_mode():
             # because any sells within this cycle will decrement it, and buys will increment it.
             
             drawdown_str = f"{drawdown:.2f}%" if drawdown is not None else "N/A"
+            latency_stats = latency_tracker.get_stats()
+            latency_str = f"{latency_stats['p50']:.0f}s" if latency_stats['count'] > 0 else "N/A"
             logger.info(
                 f"Cycle | Positions: {open_count}/{MAX_OPEN_POSITIONS} | "
                 f"Position Value: ${total_value:.2f} | Cash/BP: ${buying_power:.2f} | "
                 f"Total Equity: ${equity:.2f} | Drawdown: {drawdown_str} | "
-                f"Position Cap: ${max_portfolio_value:.2f}"
+                f"Position Cap: ${max_portfolio_value:.2f} | "
+                f"Signal Latency: {latency_str}"
             )
 
             buys_allowed            = True
@@ -727,6 +776,11 @@ async def run_trading_mode():
                     _oid = {}
                     success = await place_order(symbol, OrderSide.BUY, qty, price, order_id_out=_oid)
                     if success:
+                        # Record latency
+                        order_latency = latency_tracker.record_order_submission(symbol)
+                        if order_latency:
+                            logger.info(f"⏱️ Signal latency for {symbol}: {order_latency:.1f}s")
+
                         task = asyncio.create_task(send_discord_alert(
                             title=f"🟢 BUY {symbol}",
                             description=f"**Price:** ${price:.4f}\n**Signal:** {signal:.4f}\n**Size:** ${trade_value:.2f}\n**Regime:** {regime}",
@@ -756,6 +810,7 @@ async def run_trading_mode():
                             trade_value=float(trade_value),
                             features=predictor.last_features.get(symbol),
                             order_id=_oid.get("order_id"),
+                            feature_importance=predictor.last_feature_importance.get(symbol),
                         )
                         if open_count >= MAX_OPEN_POSITIONS:
                             logger.info("🔒 Max positions reached — no more buys this cycle.")
