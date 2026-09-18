@@ -62,8 +62,9 @@ class SignalLatencyTracker:
                 self._bar_close_times[symbol] = bar_timestamp.timestamp()
             else:
                 self._bar_close_times[symbol] = float(bar_timestamp)
-        except Exception:
-            pass
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).debug(f"Failed to record bar close for {symbol}: {e}")
 
     def record_order_submission(self, symbol: str) -> float | None:
         """Record when order was submitted, return latency in seconds."""

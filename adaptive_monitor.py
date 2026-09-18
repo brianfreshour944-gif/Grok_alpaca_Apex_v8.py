@@ -313,8 +313,8 @@ def load_adaptive_state() -> dict:
         try:
             with open(state_path, "r") as f:
                 return json.load(f)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Failed to load adaptive state: {e}")
     
     return {
         "current_action": "continue",
@@ -361,8 +361,8 @@ def determine_action(
             hours_since = (datetime.now(timezone.utc) - last_dt).total_seconds() / 3600
             if hours_since < ADAPTIVE_LIMITS["cooldown_hours_between_adaptations"]:
                 return state.get("current_action", "continue")  # Cooldown active
-        except (ValueError, TypeError):
-            pass
+        except (ValueError, TypeError) as e:
+            logger.warning(f"Failed to parse last_adaptation_ts: {e}")
     
     # Determine action based on thresholds
     if (drift_score >= DRIFT_THRESHOLDS["rollback"]["max_drift_score"] or

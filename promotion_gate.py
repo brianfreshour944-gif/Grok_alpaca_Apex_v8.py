@@ -52,8 +52,8 @@ def load_state() -> dict:
         try:
             with open(PROMOTION_STATE_PATH, "r") as f:
                 return json.load(f)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Failed to load promotion state from {PROMOTION_STATE_PATH}: {e}")
     return {
         "champion_path": MODEL_PATH,
         "champion_metrics": None,

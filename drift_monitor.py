@@ -44,8 +44,8 @@ def load_state() -> dict:
         try:
             with open(DRIFT_STATE_PATH, "r") as f:
                 return json.load(f)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Failed to load drift state from {DRIFT_STATE_PATH}: {e}")
     return {
         "last_alert_ts": None,
         "recent_signals": [],
@@ -245,8 +245,8 @@ async def send_drift_alert(metrics: dict, state: dict) -> bool:
             if (datetime.now(timezone.utc) - last_dt).total_seconds() < ALERT_COOLDOWN_HOURS * 3600:
                 logger.info("Alert cooldown active, skipping")
                 return False
-        except (ValueError, TypeError):
-            pass
+        except (ValueError, TypeError) as e:
+            logger.warning(f"Failed to parse last_alert_ts: {e}")
 
     # Build alert
     drift_signals = metrics.get("drift_signals", [])
