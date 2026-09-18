@@ -26,10 +26,9 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from config import logger, EXPERIENCE_LOG_PATH, MODEL_PATH, SEQUENCE_LEN
+from config import logger, EXPERIENCE_LOG_PATH
 from experience_capture import load_experiences
-from feature_engineering import add_features, FEATURE_COLS
-from ml_predictor import GrokGQA_Transformer
+from feature_engineering import FEATURE_COLS
 
 
 # ── Check 1: Look-Ahead Bias ────────────────────────────────────────────────
