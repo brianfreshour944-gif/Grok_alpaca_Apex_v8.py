@@ -1,7 +1,7 @@
 # tests/test_orders.py — order submission (mocked Alpaca client, no network,
 # no real DB since DATABASE_URL is unset in tests).
 
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from alpaca.trading.enums import OrderSide
@@ -51,7 +51,9 @@ def test_place_order_buy_success(mock_trading_client):
 def test_place_order_sell_prices_below_market(mock_trading_client):
     fake_order = MagicMock(id="order-2")
     mock_trading_client.submit_order.return_value = fake_order
-    mock_trading_client.get_order_by_id.return_value = MagicMock(id="order-2", filled_avg_price=None)
+    mock_trading_client.get_order_by_id.return_value = MagicMock(
+        id="order-2", filled_qty="0.01", filled_avg_price="99.9",
+    )
 
     result = run_async(place_order("BTC/USD", OrderSide.SELL, qty=0.01, price=100.0))
 
@@ -81,6 +83,41 @@ def test_place_order_still_succeeds_if_fill_lookup_fails(mock_trading_client):
     result = run_async(place_order("BTC/USD", OrderSide.BUY, qty=0.01, price=100.0))
 
     assert result is True
+
+
+def test_place_order_returns_false_when_confirmed_unfilled(mock_trading_client, monkeypatch):
+    """Regression test: a GTC limit order that Alpaca CONFIRMS never filled
+    within the poll window (filled_qty stays 0, no exception -- unlike the
+    transient-lookup-failure case above) must return False, not True.
+
+    Before this fix, place_order() returned True unconditionally after a
+    successful submission regardless of fill status. main_bot.py treats a
+    True return as "trade happened": it sets the entry cooldown, seeds
+    entry_time/highest_prices as if a position existed, and logs a phantom
+    entry to live_experiences.jsonl for capital that was never deployed.
+    Production logs showed this exact pattern: the same symbol's BUY limit
+    submitted and canceled every ~15 minutes for hours -- precisely
+    COOLDOWN_SECONDS_BUY, confirming the cooldown fired on every attempt
+    whether or not anything actually filled.
+    """
+    import orders
+    recorded = {}
+    monkeypatch.setattr(orders, "record_trade", lambda *a, **kw: recorded.update(kw))
+    # A genuinely-unfilled order polls for the full 60s timeout (30 x 2s) --
+    # collapse that to instant so this test doesn't really sleep a minute.
+    monkeypatch.setattr(orders.asyncio, "sleep", AsyncMock(return_value=None))
+
+    mock_trading_client.submit_order.return_value = MagicMock(id="order-unfilled")
+    # A real Alpaca response confirming zero fill (not an exception/timeout).
+    mock_trading_client.get_order_by_id.return_value = MagicMock(
+        id="order-unfilled", filled_qty="0", filled_avg_price=None,
+    )
+
+    result = run_async(place_order("BTC/USD", OrderSide.BUY, qty=0.01, price=100.0))
+
+    assert result is False
+    # The attempt is still recorded for audit purposes, with no fill price.
+    assert recorded["fill_price"] is None
 
 
 # ── Realized PnL pass-through ──

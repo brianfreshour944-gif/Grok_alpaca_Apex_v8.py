@@ -382,8 +382,20 @@ def calculate_risk_of_ruin(
     
     # Risk of Ruin (analytical approximation)
     # Using the formula: RoR = ((1-edge) / (1+edge))^units
-    # where edge = expected value per unit risked
-    edge = expected_value / abs(risk_per_trade) if risk_per_trade != 0 else 0
+    # where edge = expected value per unit risked, in R-multiples
+    # (win_rate*reward_risk - loss_rate) -- NOT raw expected_value/risk_per_trade.
+    # FIX: expected_value is computed from avg_win/avg_loss in whatever
+    # scale the caller passed them (stress_test.py passes percentage-points,
+    # e.g. 2.0 for 2%; this function's other caller, analyze_from_experiences
+    # below, passes fractions, e.g. 0.02 -- a real, pre-existing inconsistency
+    # between this function's two call sites) while risk_per_trade is always
+    # a dollar amount. Dividing one by the other produced a dimensionless
+    # number that was off by ~100x whenever percentage-point inputs were
+    # used, making even a genuinely strong positive edge evaluate to
+    # risk_of_ruin_analytical=1.0 (100%) via the `else` branch below.
+    # reward_risk is a ratio, so it cancels whatever scale avg_win/avg_loss
+    # were passed in -- correct regardless of which convention a caller uses.
+    edge = (win_rate * reward_risk) - (1 - win_rate)
     units_to_ruin = (account_size * max_drawdown_pct / 100) / abs(risk_per_trade) if risk_per_trade != 0 else 100
     
     if edge > 0 and (1 + edge) > 0:
@@ -392,36 +404,62 @@ def calculate_risk_of_ruin(
         risk_of_ruin_analytical = 1.0  # 100% if no edge
     
     # Monte Carlo simulation
+    # FIX: this used to bet a FIXED dollar amount (risk_per_trade, computed
+    # once from the STARTING account_size) every trade regardless of how
+    # equity changed across the simulated year. The bot itself never sizes
+    # this way -- calculate_adjusted_risk()/calculate_kelly_multiplier()
+    # always size as a % of CURRENT equity, recalculated fresh every trade
+    # (regime.py, portfolio.py). Fixed-DOLLAR betting can hit literal $0
+    # equity; fixed-FRACTIONAL betting (the bot's real behavior) shrinks
+    # position size as losses accumulate and mathematically cannot cross
+    # zero, so the old simulation materially overstated true ruin
+    # probability. risk_fraction recovers the equity-% the caller intended
+    # (both current call sites size risk_per_trade as
+    # account_size * BASE_RISK_PERCENT) and re-applies it against the
+    # CURRENT simulated equity every trade instead of the starting one.
     n_simulations = 10000
     n_trades = 252  # One year of daily trades
-    
+    risk_fraction = abs(risk_per_trade) / account_size if account_size > 0 else 0.02
+
     ruins = 0
     max_drawdowns = []
-    
+
     for _ in range(n_simulations):
         equity = account_size
         peak = account_size
         max_dd = 0
-        
+
         for _ in range(n_trades):
+            current_risk = equity * risk_fraction
             if np.random.random() < win_rate:
-                equity += risk_per_trade * reward_risk
+                equity += current_risk * reward_risk
             else:
-                equity -= risk_per_trade
-            
+                equity -= current_risk
+
             if equity <= 0:
                 ruins += 1
                 max_dd = 100
                 break
-            
+
             peak = max(peak, equity)
             dd = (peak - equity) / peak * 100
             max_dd = max(max_dd, dd)
-        
+
         max_drawdowns.append(max_dd)
-    
+
     risk_of_ruin_mc = ruins / n_simulations
-    
+
+    # Probability a simulated year breaches the account's actual configured
+    # drawdown kill-switch (max_drawdown_pct), not just literal $0 equity.
+    # FIX: fixed-fractional sizing (above) correctly makes literal ruin
+    # near-impossible over a bounded horizon even for a losing edge -- but
+    # that alone would make risk_of_ruin_mc misleadingly report "LOW RISK"
+    # for a scenario whose OWN drawdown stats (avg/worst/p95_max_drawdown
+    # below) show the account getting gutted well before it ever reaches
+    # $0. This is the more practically relevant "ruin" for a bot that
+    # actually halts trading at max_drawdown_pct, not at $0.
+    prob_dd_exceeds_threshold = float(np.mean([dd > max_drawdown_pct for dd in max_drawdowns]))
+
     # Maximum consecutive losses (probabilistic)
     prob_consec_loss = (1 - win_rate) ** max_consecutive_losses
     
@@ -453,10 +491,24 @@ def calculate_risk_of_ruin(
             "analytical": round(float(risk_of_ruin_analytical), 6),
             "monte_carlo": round(float(risk_of_ruin_mc), 6),
             "prob_consec_losses": round(float(prob_consec_loss), 6),
+            "prob_drawdown_exceeds_threshold": round(prob_dd_exceeds_threshold, 6),
+            # FIX: interpretation previously looked ONLY at risk_of_ruin_mc
+            # (probability of literal $0 equity). Once Monte Carlo sizing
+            # was corrected to fixed-fractional (matching how the bot
+            # actually sizes trades), risk_of_ruin_mc correctly drops to
+            # ~0 for almost any scenario short of a coin-flip-or-worse edge
+            # with a huge bet size -- which made this report "LOW RISK"
+            # for scenarios whose OWN avg/worst/p95_max_drawdown numbers
+            # a few lines down show the account getting gutted 60-90%
+            # before ever reaching zero. Weighing
+            # prob_drawdown_exceeds_threshold (chance of breaching the
+            # account's actual configured kill-switch) alongside literal
+            # ruin keeps the headline verdict from contradicting the
+            # detailed data sitting right next to it.
             "interpretation": (
-                "VERY HIGH RISK" if risk_of_ruin_mc > 0.1
-                else "HIGH RISK" if risk_of_ruin_mc > 0.01
-                else "MODERATE RISK" if risk_of_ruin_mc > 0.001
+                "VERY HIGH RISK" if risk_of_ruin_mc > 0.1 or prob_dd_exceeds_threshold > 0.5
+                else "HIGH RISK" if risk_of_ruin_mc > 0.01 or prob_dd_exceeds_threshold > 0.2
+                else "MODERATE RISK" if risk_of_ruin_mc > 0.001 or prob_dd_exceeds_threshold > 0.05
                 else "LOW RISK"
             ),
         },

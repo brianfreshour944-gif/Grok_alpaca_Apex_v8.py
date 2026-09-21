@@ -131,6 +131,17 @@ async def place_order(symbol: str, side: OrderSide, qty: float, price: float = N
 
         except Exception as fill_err:
             logger.warning(f"Could not fetch fill details for order {order.id}: {fill_err}")
+
+        # Distinguish "we confirmed the order did NOT fill" from "we never
+        # managed to confirm anything." filled_order is only non-None when
+        # get_order_by_id actually returned a status (possibly showing zero
+        # fill after the full 60s timeout) -- that's a real, honest non-fill.
+        # If filled_order is still None here, every poll attempt raised
+        # (e.g. persistent API errors), so we genuinely don't know whether
+        # the order filled; the submission itself already succeeded, so
+        # that uncertainty is treated as success rather than guessed as a
+        # failure, same as before this fix.
+        order_confirmed_unfilled = filled_order is not None and actual_fill_price is None
         
         # Log slippage if fill price differs from expected
         if actual_fill_price and price:
@@ -160,7 +171,19 @@ async def place_order(symbol: str, side: OrderSide, qty: float, price: float = N
         )
         pnl_log = f" | Realized PnL: ${realized_pnl_dollar:+.2f} ({realized_pnl_pct*100:+.2f}%)" if realized_pnl_dollar is not None else ""
         logger.info(f"Order submitted: {side.value} {symbol} {qty:.6f} limit={limit_price} fill={actual_fill_price or 'pending'} fee=${actual_fee:.4f}{pnl_log}")
-        return True
+
+        # CRITICAL: this used to `return True` unconditionally here, meaning
+        # a GTC limit order CONFIRMED never to have filled within the 60s
+        # poll window (verified in production logs: DOTUSD submitted-and-
+        # canceled every ~15 minutes for hours, exactly matching
+        # COOLDOWN_SECONDS_BUY) was still treated by main_bot.py as a
+        # successful trade -- setting the entry cooldown, seeding
+        # entry_time/highest_prices as if a position existed, and logging a
+        # phantom entry to live_experiences.jsonl for capital that was never
+        # actually deployed. The trades-table row above (fill_price=None)
+        # still records the attempt for audit purposes; only the
+        # caller-facing success signal changes.
+        return not order_confirmed_unfilled
 
     except Exception as e:
         logger.error(f"Order failed ({side.value} {symbol} qty={qty:.6f}): {e}")

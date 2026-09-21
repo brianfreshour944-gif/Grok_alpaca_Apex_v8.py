@@ -6,6 +6,7 @@ import asyncio
 import os
 import sys
 import time
+from datetime import timedelta
 
 # Ensure UTF-8 encoding for stdout/stderr to prevent UnicodeEncodeError on Windows
 sys.stdout.reconfigure(encoding='utf-8')
@@ -198,7 +199,27 @@ class TradingBotState:
 # truth so the live bot and diagnostic/backtest tooling can't silently
 # drift apart.
 
-predictor = SafeMLPredictor(model_path=MODEL_PATH, seq_len=SEQUENCE_LEN)
+try:
+    predictor = SafeMLPredictor(model_path=MODEL_PATH, seq_len=SEQUENCE_LEN)
+except Exception as e:
+    # Previously this instantiation had no try/except: a missing or
+    # corrupted model file raised at import time and crashed the whole
+    # process with a bare traceback before the trading loop -- or any
+    # logging -- ever ran. operational_reliability.py's claims table says
+    # "Model Unavailable -> Response: Use fallback (shadow GBT), or pause",
+    # but shadow_model.py's GBT challenger is deliberately scoped to
+    # logging only and NEVER trades (see its own docstring) -- there is no
+    # live fallback to fall back to. Fail loudly with a clear, actionable
+    # message and stop (matching the "pause, require human approval"
+    # semantics already used elsewhere in this codebase for other
+    # critical failures) rather than either an unexplained crash or
+    # silently trading with no model at all.
+    logger.critical(
+        f"🛑 Model failed to load from {MODEL_PATH}: {e}. "
+        f"Bot cannot start without a working model — there is no live "
+        f"fallback. Fix or replace the model file, then restart."
+    )
+    sys.exit(1)
 
 
 # ── Main trading loop ───────────────────────────────────────────────
@@ -519,6 +540,15 @@ async def run_trading_mode():
             for symbol, df in valid_dataframes.items():
 
                 alpaca_sym = normalize_symbol(symbol)
+
+                # Signal-latency tracking (bar close -> order submission):
+                # record_order_submission() below has always returned None
+                # because nothing ever called record_bar_close() to seed
+                # _bar_close_times -- "Signal Latency: N/A" logged every
+                # cycle regardless of how many orders actually filled.
+                # df.index[-1] is the bar OPEN time (data_feeds.py's own
+                # documented convention); the bar closes 15 minutes later.
+                latency_tracker.record_bar_close(symbol, df.index[-1] + timedelta(minutes=15))
 
                 regime, trend, atr_pct = compute_regime_and_trend(df)
                 regime_params = get_regime_params(regime)

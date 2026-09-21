@@ -140,10 +140,23 @@ FAILURE_SCENARIOS = {
     "model_unavailable": {
         "name": "Model Unavailable",
         "description": "ML model file missing or corrupted",
-        "severity": "HIGH",
-        "detection": "Model load failure, prediction error",
-        "response": "Use fallback (shadow GBT), or pause",
-        "recovery": "Reload model from backup",
+        "severity": "CRITICAL",
+        "detection": "Model load failure at startup (main_bot.py logs a "
+                      "critical error and exits cleanly)",
+        # Corrected: shadow_model.py's GBT challenger is deliberately
+        # scoped to logging only and NEVER trades (see its own docstring)
+        # -- there is no live fallback to fall back to. This claim
+        # previously said "Use fallback (shadow GBT), or pause" without
+        # that ever being true; main_bot.py also previously had no
+        # try/except around model loading at all, so the real prior
+        # behavior was an unhandled crash, not even a clean pause. Both
+        # are now fixed: the process fails loudly with a clear message
+        # and stops, rather than a bare traceback or a nonexistent
+        # fallback.
+        "response": "No live fallback exists. Process logs a critical "
+                     "error naming the failure and exits -- does not "
+                     "start trading with no model.",
+        "recovery": "Fix or replace the model file, then restart.",
     },
     "llm_api_unavailable": {
         "name": "LLM/API Unavailable",
