@@ -236,8 +236,15 @@ def add_features(df: pd.DataFrame) -> pd.DataFrame:
     # Small avg trade  -> retail limit-order churn.
     # When trade_count is unreliable (<=1), use volume directly as a proxy
     # for activity level rather than the noisy volume/trade_count ratio.
+    # NOTE: np.where() always returns a raw ndarray (never a Series, even
+    # when every input is one) -- passing that straight into _sanitize()
+    # made .replace() raise AttributeError on every call, unconditionally
+    # (verified: this broke add_features() for 100% of inputs from
+    # 2026-09-17 until this fix). volume.where(...) is pandas' own
+    # Series-preserving equivalent of the same "keep A where cond, else B"
+    # operation.
     trade_size_raw = _sanitize(
-        np.where(tc_is_reliable > 0.5, volume / tc_raw, volume),
+        volume.where(tc_is_reliable <= 0.5, volume / tc_raw),
         fill=0.0,
     )
     d["trade_size_proxy"] = _z_score(trade_size_raw, window=20, fill=0.0)

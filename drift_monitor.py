@@ -22,6 +22,7 @@ import numpy as np
 from config import logger, DISCORD_WEBHOOK_URL, EXPERIENCE_LOG_PATH
 from experience_capture import load_experiences
 from feature_engineering import FEATURE_COLS
+from notifications import send_discord_alert
 
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -269,20 +270,15 @@ async def send_drift_alert(metrics: dict, state: dict) -> bool:
     )
 
     try:
-        import httpx
-        async with httpx.AsyncClient() as client:
-            await client.post(
-                DISCORD_WEBHOOK_URL,
-                json={
-                    "embeds": [{
-                        "title": f"Model Drift Detected",
-                        "description": description,
-                        "color": color,
-                        "timestamp": datetime.now(timezone.utc).isoformat(),
-                    }]
-                },
-                timeout=10.0,
-            )
+        # NOTE: this previously used `httpx` directly, which is not declared
+        # in requirements.txt/requirements-dev.txt and is not installed by
+        # them -- every call raised ModuleNotFoundError, silently caught
+        # below, so this alert has never actually reached Discord in an
+        # environment built from this repo's own dependencies. Reusing
+        # notifications.send_discord_alert (aiohttp, already a declared
+        # dependency and already used by main_bot.py) avoids adding a
+        # second HTTP client just for this one call site.
+        await send_discord_alert(title=title, description=description, color=color)
         state["last_alert_ts"] = datetime.now(timezone.utc).isoformat()
         save_state(state)
         logger.info("Drift alert sent to Discord")

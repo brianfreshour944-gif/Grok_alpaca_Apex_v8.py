@@ -546,6 +546,13 @@ async def run_trading_mode():
                     _shadow = get_shadow_gbt()
                     if _shadow.available():
                         _feat_row = predictor.last_features.get(symbol)
+                        # _gbt_prob must exist even when _feat_row is falsy --
+                        # it was previously only assigned inside the `if`
+                        # below, so a short/missing feature window raised
+                        # UnboundLocalError on the log call right after it,
+                        # silently (caught by this same try/except at DEBUG
+                        # level, invisible under the default INFO log level).
+                        _gbt_prob = None
                         if _feat_row:
                             _gbt_prob = _shadow.predict_row(_feat_row)
                         log_shadow_prediction(

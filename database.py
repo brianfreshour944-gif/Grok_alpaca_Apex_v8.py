@@ -279,7 +279,7 @@ def backfill_trade_if_missing(order) -> bool:
                         (bot_name, exchange, symbol, side, price, quantity,
                          value, fee, fill_price, order_id, timestamp)
                     VALUES (%s, 'Alpaca', %s, %s, %s, %s, %s, %s, %s, %s, COALESCE(%s, NOW()))
-                """, (bot_name, symbol, side, fill_price or 0.0, qty, value,
+                """, (BOT_NAME, symbol, side, fill_price or 0.0, qty, value,
                       fee, fill_price, order_id, created))
             conn.commit()
         logger.info(f"🔁 Back-filled missing trade row from exchange order {order_id} "

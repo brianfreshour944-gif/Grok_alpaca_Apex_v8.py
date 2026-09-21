@@ -67,18 +67,31 @@ def get_all_positions() -> dict:
     """
     Returns {alpaca_symbol: {qty, avg_entry, market_value, current_price}}
     for every open Alpaca position.
+
+    market_value/current_price are built per-position (not one dict
+    comprehension for all of them) because alpaca-py's own Position model
+    types both as Optional[str] = None -- a single position with either
+    field null previously made float() raise inside the comprehension,
+    which the outer except caught and turned into an EMPTY dict for
+    EVERY position, not just the affected one. That silently told the
+    rest of the bot "you hold nothing" while positions were still open
+    and unmonitored. Skipping just the one bad position and falling back
+    to 0.0 for a null value keeps every other real position visible.
     """
     try:
         positions = trading_client.get_all_positions()
-        return {
-            p.symbol: {
-                "qty":           float(p.qty),
-                "avg_entry":     float(p.avg_entry_price),
-                "market_value":  float(p.market_value),
-                "current_price": float(p.current_price),
-            }
-            for p in positions
-        }
+        result = {}
+        for p in positions:
+            try:
+                result[p.symbol] = {
+                    "qty":           float(p.qty),
+                    "avg_entry":     float(p.avg_entry_price),
+                    "market_value":  float(p.market_value) if p.market_value is not None else 0.0,
+                    "current_price": float(p.current_price) if p.current_price is not None else 0.0,
+                }
+            except (TypeError, ValueError) as e:
+                logger.error(f"get_all_positions: skipping {p.symbol}, bad data: {e}")
+        return result
     except Exception as e:
         logger.error(f"get_all_positions failed: {e}")
         return {}
