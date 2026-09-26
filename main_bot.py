@@ -439,20 +439,20 @@ async def run_trading_mode():
                         price = float(p["current_price"])
                         try:
                             # Crash-recovery guard: query exchange before placing
-                        _open_now = await asyncio.to_thread(fetch_open_sell_symbols)
-                        if symbol in _open_now or symbol.replace("/","") in _open_now:
-                            logger.warning(f"Skip duplicate for {symbol}: already open")
-                            success = False
-                        else:
-                            success = await place_order(
-                                denormalize_symbol(symbol), OrderSide.SELL,
-                                float(p["qty"]), price, avg_entry=avg_entry
-                            )
-                            if success:
-                                logger.info(f"  📉 Kill-switch: closed {symbol} at ${price:.4f}")
+                            _open_now = await asyncio.to_thread(fetch_open_sell_symbols)
+                            if symbol in _open_now or symbol.replace("/","") in _open_now:
+                                logger.warning(f"Skip duplicate for {symbol}: already open")
+                                success = False
                             else:
-                                logger.error(f"  ❌ Kill-switch: FAILED closing {symbol} — will retry next cycle")
-                                # Don't mark pending exit; we need this to close next cycle
+                                success = await place_order(
+                                    denormalize_symbol(symbol), OrderSide.SELL,
+                                    float(p["qty"]), price, avg_entry=avg_entry
+                                )
+                                if success:
+                                    logger.info(f"  📉 Kill-switch: closed {symbol} at ${price:.4f}")
+                                else:
+                                    logger.error(f"  ❌ Kill-switch: FAILED closing {symbol} — will retry next cycle")
+                                    # Don't mark pending exit; we need this to close next cycle
                         except Exception as e:
                             logger.error(f"  ❌ Kill-switch: exception closing {symbol}: {e}")
 
