@@ -165,7 +165,22 @@ def get_circuit_breaker(symbol: str) -> CircuitBreaker:
     return circuit_breakers[symbol]
 
 # --- Trading Bot State Class ---
+# Crash-recovery: load state from exchange / DB on init
 class TradingBotState:
+    """Encapsulates per-bot state; loads from DB on restart, else defaults."""
+    def __init__(self):
+        self.cooldown_until: dict = {}
+        self.entry_time: dict = {}
+        self.latest_signals: dict = {}
+        self.highest_prices: dict = {}
+        self.start_equity: float | None = None
+        self.last_universe_scan: float = 0.0
+        self.active_universe: list = []
+        # Attempt DB load; if missing, stay at defaults (correct after restart)
+        try:
+            self.load_from_db()
+        except Exception:
+            pass
     """Encapsulates all per-bot-instance state to avoid module-level globals."""
     
     def __init__(self):
@@ -423,6 +438,12 @@ async def run_trading_mode():
                         avg_entry = float(p["avg_entry"])
                         price = float(p["current_price"])
                         try:
+                            # Crash-recovery guard: query exchange before placing
+                        _open_now = await asyncio.to_thread(fetch_open_sell_symbols)
+                        if symbol in _open_now or symbol.replace("/","") in _open_now:
+                            logger.warning(f"Skip duplicate for {symbol}: already open")
+                            success = False
+                        else:
                             success = await place_order(
                                 denormalize_symbol(symbol), OrderSide.SELL,
                                 float(p["qty"]), price, avg_entry=avg_entry

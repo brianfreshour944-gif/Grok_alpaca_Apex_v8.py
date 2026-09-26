@@ -56,6 +56,12 @@ async def place_order(symbol: str, side: OrderSide, qty: float, price: float = N
     downstream logging (e.g. experience capture) with the real order.
     """
     try:
+        # Crash-recovery: record pending order immediately so restart can reconcile
+        try:
+            import database
+            database.log_pending_order(order_id_out.get("order_id") if order_id_out else None, symbol, side, qty, price)
+        except Exception:
+            pass
         if side == OrderSide.SELL:
             qty         = math.floor(qty * 1e8) / 1e8
             raw_limit   = price * 0.999 if price else None

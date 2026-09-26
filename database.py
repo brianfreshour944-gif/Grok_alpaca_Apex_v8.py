@@ -91,6 +91,16 @@ def _init_tables(cur):
     """)
 
 
+def recover_db_if_corrupt():
+    import os, sqlite3
+    try:
+        conn = sqlite3.connect('bot.db')
+        conn.execute('PRAGMA integrity_check')
+        conn.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+        conn.close()
+    except Exception as e:
+        import logging; logging.getLogger(__name__).error(f"DB recovery needed: {e}")
+
 def init_db():
     """
     Run all DDL once at startup. Safe to call multiple times (IF NOT EXISTS).
