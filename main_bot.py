@@ -499,7 +499,7 @@ async def run_trading_mode():
             running_portfolio_value = total_value  # Position exposure only
 
             # ── Circuit Breaker: block new entries if exchange is degraded ─────
-            if circuit_breaker.is_tripped():
+            if get_circuit_breaker("exchange").is_tripped():
                 logger.warning(
                     f"🔌 Circuit breaker is OPEN — blocking new entries. "
                     f"(Exits/position closes still allowed for risk reduction.)"
