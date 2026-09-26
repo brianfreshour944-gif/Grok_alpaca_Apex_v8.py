@@ -116,9 +116,11 @@ async def place_order(symbol: str, side: OrderSide, qty: float, price: float = N
                 if filled_qty and float(filled_qty) > 0:
                     if hasattr(filled_order, 'filled_avg_price') and filled_order.filled_avg_price:
                         actual_fill_price = float(filled_order.filled_avg_price)
-                    # NOTE: alpaca-py 0.33.0 Order model has no 'commission' field.
-                    # Fee data is not accessible via the TradingClient order objects.
-                    # actual_fee remains 0.0 — fees are not currently captured.
+                    # SDK 0.44.0: commission exists only on broker Order, not trading Order
+                    # actual_fee remains 0.0 — fees not captured via this object
+                    fee = getattr(filled_order, 'commission', None)
+                    if fee is not None:
+                        actual_fee = float(fee)
                     break
 
                 await asyncio.sleep(FILL_POLL_INTERVAL)

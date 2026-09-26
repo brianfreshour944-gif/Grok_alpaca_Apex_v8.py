@@ -275,11 +275,8 @@ class SafeMLPredictor:
                 df = df.copy()
                 df_features = add_features(df)
                 window = df_features[FEATURE_COLS].tail(self.seq_len)
-
-                if len(window) < self.seq_len:
-                    # Drop any feature snapshot from a previous cycle so
-                    # consumers (shadow inference / experience capture)
-                    # never score stale bars against a fresh signal.
+                # Boundary: validate length AFTER all filtering; guard NaN
+                if len(window) < self.seq_len or not np.isfinite(window.values).all():
                     self.last_features.pop(symbol, None)
                     processed[symbol] = 0.5
                     continue

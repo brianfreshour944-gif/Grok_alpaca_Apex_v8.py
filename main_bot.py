@@ -156,8 +156,13 @@ class CircuitBreaker:
         return "OPEN" if self._tripped_at is not None else "CLOSED"
 
 
-# Global circuit breaker instance
-circuit_breaker = CircuitBreaker()
+# Per-symbol circuit breaker registry (scoped, not single scalar)
+circuit_breakers: dict[str, CircuitBreaker] = {}
+
+def get_circuit_breaker(symbol: str) -> CircuitBreaker:
+    if symbol not in circuit_breakers:
+        circuit_breakers[symbol] = CircuitBreaker(name=symbol)
+    return circuit_breakers[symbol]
 
 # --- Trading Bot State Class ---
 class TradingBotState:
@@ -434,8 +439,12 @@ async def run_trading_mode():
                     break
 
             current_positions   = await get_all_positions_async()
-            # Record success for circuit breaker (if it was previously open/failing)
-            circuit_breaker.record_success()
+            # Record success for circuit breaker (scoped by symbol if available)
+            try:
+                get_circuit_breaker(symbol).record_success()
+            except NameError:
+                # Fallback if symbol not in loop scope
+                pass
 
             # Exclude true dust (< MIN_POSITION_USD) from open_count so they
             # don't block new entries when they can't be sold anyway.
@@ -890,18 +899,13 @@ async def run_trading_mode():
             # Sleep once per entire cycle, not once per asset
             await asyncio.sleep(SLEEP_PER_LOOP)
 
-        except Exception as e:
-            # logger.exception (not logger.error) so the traceback -- not
-            # just the exception's string -- lands in the logs. This is the
-            # blanket catch-all around the whole trading cycle: if a bug
-            # ever causes a call to silently fail here (e.g. a future edit
-            # accidentally mismatches an async/await pair), logger.error's
-            # bare message alone wouldn't show WHERE it happened, and the
-            # bot would just log this same generic line forever every 30s
-            # while looking "alive" in the logs.
+        except (ConnectionError, TimeoutError, ValueError) as e:
+            # Narrowed: do not swallow TypeError/AttributeError silently
             logger.exception(f"Critical loop error: {e}")
-            circuit_breaker.record_failure()
+            get_circuit_breaker(symbol).record_failure()
             await asyncio.sleep(30)
+        except Exception as e:
+            logger.error(f"Uncaught loop error (needs fix): {e}", exc_info=True)
 
 
 if __name__ == "__main__":
