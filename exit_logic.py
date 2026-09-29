@@ -52,11 +52,16 @@ def evaluate_exit(
     here so it is directly comparable to stop_loss_pct/profit_target_pct
     and so displaying it as `pnl_pct * 100` gives the real percentage.
 
-    Priority order (first match wins), matching the original live logic:
+    Priority order (first match wins):
       1. Trailing stop (once price has run up past profit_target_pct from entry)
-      2. Time-decay stop loss (tightens the stop the longer the position is held)
+      2. Time-decay stop loss
       3. Max hold time
       4. Weak signal (only once min_hold_hours_before_signal has elapsed)
+
+    Guards 2-4 are evaluated even when the trailing stop is armed but not
+    triggered, so an armed trailing stop can no longer hold a stalled winner
+    open past max_hold_hours (the trailing trigger is the only exit that
+    takes precedence over them).
     """
     pnl_pct = pct_change_x100(avg_entry, price) / 100.0 if avg_entry > 0 else 0.0
 
@@ -81,6 +86,14 @@ def evaluate_exit(
 
     exit_reason = None
 
+    # Trailing stop: the classic give-back exit. It runs FIRST and is NOT
+    # mutually exclusive with the other exits -- it must never suppress the
+    # stop loss, max-hold, or weak-signal checks below. Previously this was
+    # an if/elif chain, so once a position had run past its profit target
+    # (arming the trailing stop), max-hold became unreachable: a winner that
+    # stopped rising sat within 1-2% of its peak indefinitely and was held
+    # far past MAX_HOLD_HOURS (observed live: LINK held 8.8h vs a 4.0h cap),
+    # decaying the captured gain while nothing could fire.
     if highest_seen > avg_entry * (1 + profit_target_pct):
         trailing_stop_price = highest_seen * (1 - trailing_stop_pct)
         if price <= trailing_stop_price:
@@ -89,14 +102,17 @@ def evaluate_exit(
                 f"Stop: {trailing_stop_pct*100:.2f}% off peak, "
                 f"PnL: {pnl_pct*100:.2f}%) [{regime}]"
             )
-    elif pnl_pct <= -dynamic_sl_pct:
+
+    # Guard exits: these fire regardless of trailing-stop state so a stalled
+    # winner is always collected. Priority: stop loss > max hold > weak signal.
+    if exit_reason is None and pnl_pct <= -dynamic_sl_pct:
         exit_reason = (
             f"🛑 Time-Decay Stop loss ({pnl_pct*100:.2f}% <= "
             f"-{dynamic_sl_pct*100:.2f}%) [{regime}]"
         )
-    elif held_hours >= max_hold_hours:
+    if exit_reason is None and held_hours >= max_hold_hours:
         exit_reason = f"⏰ Max hold time ({held_hours:.1f}h)"
-    elif held_hours >= min_hold_hours_before_signal and signal < sell_signal:
+    if exit_reason is None and held_hours >= min_hold_hours_before_signal and signal < sell_signal:
         exit_reason = f"📉 Signal weak ({signal:.3f}) [{regime}]"
 
     return ExitDecision(

@@ -194,3 +194,52 @@ def test_strong_signal_keeps_holding():
         signal=SELL_SIGNAL + 0.1,
     )
     assert decision.exit_reason is None
+
+
+# ── Regression: armed trailing stop must not suppress guard exits ────────────
+# The original if/elif chain made max-hold (and stop-loss/weak-signal)
+# unreachable for any position that had ever exceeded its profit target --
+# observed live: LINK held 8.8h against a 4.0h MAX_HOLD_HOURS while the
+# armed-but-untriggered trailing stop blocked every other exit.
+
+def test_max_hold_fires_even_when_trailing_stop_is_armed():
+    """The LINK scenario: winner past profit target, stalled within the
+    trailing-stop band, held far past max hold time. Must exit."""
+    decision = _evaluate(
+        avg_entry=100.0, price=101.0, highest_seen=101.5,  # +1.5% from entry, within 1% of peak
+        held_hours=MAX_HOLD_HOURS + 0.5, signal=0.6,
+    )
+    assert decision.exit_reason is not None
+    assert "Max hold time" in decision.exit_reason
+
+
+def test_time_decay_stop_fires_even_when_trailing_stop_is_armed():
+    """A winner that gaps through the trailing band to a stop-loss-level loss
+    must exit via stop loss, not sit waiting for the trailing trigger."""
+    decision = _evaluate(
+        avg_entry=100.0, price=95.0, highest_seen=102.0,  # peak armed trailing; now -5%
+        held_hours=1.5,
+    )
+    assert decision.exit_reason is not None
+    assert "Stop loss" in decision.exit_reason
+
+
+def test_weak_signal_fires_even_when_trailing_stop_is_armed():
+    decision = _evaluate(
+        avg_entry=100.0, price=101.0, highest_seen=101.5,
+        held_hours=MIN_HOLD_HOURS_BEFORE_SIGNAL + 0.1,
+        signal=SELL_SIGNAL - 0.05,
+    )
+    assert decision.exit_reason is not None
+    assert "Signal weak" in decision.exit_reason
+
+
+def test_trailing_stop_takes_precedence_over_max_hold_when_both_apply():
+    """When both could fire, trailing stop wins (it's the intended give-back
+    exit) -- guards are fallbacks, not overrides of the trailing trigger."""
+    decision = _evaluate(
+        avg_entry=100.0, price=108.8, highest_seen=110.0,  # 1.1% off peak -> trailing fires
+        held_hours=MAX_HOLD_HOURS + 1.0,
+    )
+    assert decision.exit_reason is not None
+    assert "Trailing Stop" in decision.exit_reason
