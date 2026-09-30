@@ -41,6 +41,8 @@ def evaluate_exit(
     trailing_stop_atr_multiplier: float,
     min_trailing_stop_pct: float,
     max_trailing_stop_pct: float,
+    slow_bleed_pct: Optional[float] = None,      # None disables the slow-bleed exit (fail-open)
+    slow_bleed_min_hours: float = 1.0,           # position age before the slow-bleed exit can fire
 ) -> ExitDecision:
     """
     Decides whether an open position should be exited this cycle.
@@ -109,6 +111,11 @@ def evaluate_exit(
         exit_reason = (
             f"🛑 Time-Decay Stop loss ({pnl_pct*100:.2f}% <= "
             f"-{dynamic_sl_pct*100:.2f}%) [{regime}]"
+        )
+    if exit_reason is None and slow_bleed_pct is not None and held_hours >= slow_bleed_min_hours and pnl_pct <= -slow_bleed_pct:
+        exit_reason = (
+            f"🐌 Slow-bleed exit ({pnl_pct*100:.2f}% after {held_hours:.1f}h, "
+            f"never reached +{profit_target_pct*100:.0f}% for trailing stop) [{regime}]"
         )
     if exit_reason is None and held_hours >= max_hold_hours:
         exit_reason = f"⏰ Max hold time ({held_hours:.1f}h)"

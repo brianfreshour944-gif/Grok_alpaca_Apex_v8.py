@@ -22,7 +22,7 @@ from config import (
     MAX_OPEN_POSITIONS, MAX_DRAWDOWN_STOP, DAILY_LOSS_LIMIT, MAX_HOLD_HOURS,
     BASE_RISK_PERCENT, MIN_POSITION_USD, MIN_ORDER_USD, MAX_SINGLE_TRADE_USD,
     MAX_POSITION_PCT,
-    MIN_HOLD_HOURS_BEFORE_SIGNAL,
+    MIN_HOLD_HOURS_BEFORE_SIGNAL, SLOW_BLEED_PCT, SLOW_BLEED_MIN_HOURS,
     COOLDOWN_SECONDS_BUY, COOLDOWN_SECONDS_SELL, SLEEP_PER_LOOP,
     TRAILING_STOP_ATR_MULTIPLIER, MIN_TRAILING_STOP_PCT, MAX_TRAILING_STOP_PCT,
     DYNAMIC_UNIVERSE_CANDIDATES, UNIVERSE_SIZE, UNIVERSE_REFRESH_SECONDS,
@@ -173,6 +173,7 @@ class TradingBotState:
         self.entry_time: dict = {}
         self.latest_signals: dict = {}
         self.highest_prices: dict = {}
+        self.signal_stale_since: dict = {}
         self.start_equity: float | None = None
         self.last_universe_scan: float = 0.0
         self.active_universe: list = []
@@ -188,6 +189,7 @@ class TradingBotState:
         self.entry_time: dict = {}
         self.latest_signals: dict = {}
         self.highest_prices: dict = {}
+        self.signal_stale_since: dict = {}
         self.start_equity: float | None = None
         self.last_universe_scan: float = 0.0
         self.active_universe: list = []
@@ -208,7 +210,7 @@ class TradingBotState:
     
     def prune_tracking_state(self, keep_symbols: set):
         """Prune tracking state for symbols no longer relevant."""
-        for state_dict in (self.latest_signals, self.entry_time, self.highest_prices):
+        for state_dict in (self.latest_signals, self.entry_time, self.highest_prices, self.signal_stale_since):
             for sym in list(state_dict.keys()):
                 if sym not in keep_symbols:
                     state_dict.pop(sym, None)
@@ -584,7 +586,20 @@ async def run_trading_mode():
                 regime_params = get_regime_params(regime)
                 position_size_multiplier = 1.0  # regime_flag removed (was Windows-only path)
 
-                signal = signals.get(symbol, 0.5)
+                raw_signal = signals.get(symbol)
+                if raw_signal is None:
+                    # Missing ML signal must NOT read as a neutral-to-bullish 0.5
+                    # (which sits above every sell threshold and holds a falling
+                    # position through data gaps). Track how stale this symbol's
+                    # signal is; only the weak-signal exit needs the default.
+                    state.signal_stale_since.setdefault(symbol, now)
+                    signal = state.latest_signals.get(symbol, 0.5)
+                    stale_min = (now - state.signal_stale_since[symbol]) / 60
+                    logger.info(f"⚠️ {symbol}: ML signal missing this cycle "
+                                f"(stale {stale_min:.0f}min) — using last known {signal:.4f}")
+                else:
+                    state.signal_stale_since.pop(symbol, None)
+                    signal = raw_signal
                 state.latest_signals[symbol] = signal
                 # FORCE LOG AT INFO LEVEL - this will appear 100%
                 logger.info(
@@ -653,6 +668,8 @@ async def run_trading_mode():
                         sell_signal=regime_params["sell_signal"],
                         max_hold_hours=MAX_HOLD_HOURS,
                         min_hold_hours_before_signal=MIN_HOLD_HOURS_BEFORE_SIGNAL,
+                        slow_bleed_pct=SLOW_BLEED_PCT,
+                        slow_bleed_min_hours=SLOW_BLEED_MIN_HOURS,
                         trailing_stop_atr_multiplier=TRAILING_STOP_ATR_MULTIPLIER,
                         min_trailing_stop_pct=MIN_TRAILING_STOP_PCT,
                         max_trailing_stop_pct=MAX_TRAILING_STOP_PCT,
@@ -907,7 +924,7 @@ async def run_trading_mode():
             keep_symbols = set(symbols_to_process) | {
                 denormalize_symbol(s) for s in current_positions.keys()
             }
-            for state_dict in (state.latest_signals, state.entry_time, state.highest_prices):
+            for state_dict in (state.latest_signals, state.entry_time, state.highest_prices, state.signal_stale_since):
                 for sym in list(state_dict.keys()):
                     if sym not in keep_symbols:
                         state_dict.pop(sym, None)

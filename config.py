@@ -91,6 +91,13 @@ MIN_POSITION_USD             = 5.0   # ignore dust positions below this
 MIN_ORDER_USD                = 10.0  # Alpaca minimum crypto order notional
 MIN_HOLD_HOURS_BEFORE_SIGNAL = 0.5   # hold at least this long before signal-exit
 
+# Slow-bleed exit: after SLOW_BLEED_MIN_HOURS held, exit a position that has
+# drifted down by SLOW_BLEED_PCT but never deep enough to trip the stop loss
+# and never up enough to arm the trailing stop. Closes the "hold a slow
+# loser for the full MAX_HOLD_HOURS" hole. Set to None to disable (fail-open).
+SLOW_BLEED_PCT               = float(os.getenv("SLOW_BLEED_PCT", "0.01"))
+SLOW_BLEED_MIN_HOURS         = float(os.getenv("SLOW_BLEED_MIN_HOURS", "1.0"))
+
 # Trailing stop: distance from peak scales with realized volatility (ATR%)
 # instead of a fixed 1%. trailing_stop_pct = clamp(atr_pct/100 * multiplier,
 # min, max). At atr_pct=2.0 (the "normal" baseline in regime.py) this

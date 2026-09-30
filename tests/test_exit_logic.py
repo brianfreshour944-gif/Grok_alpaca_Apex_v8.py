@@ -15,6 +15,7 @@ import pytest
 
 from config import (
     PROFIT_TARGET_PCT, STOP_LOSS_PCT, SELL_SIGNAL, MAX_HOLD_HOURS, MIN_HOLD_HOURS_BEFORE_SIGNAL,
+    SLOW_BLEED_PCT, SLOW_BLEED_MIN_HOURS,
     TRAILING_STOP_ATR_MULTIPLIER, MIN_TRAILING_STOP_PCT, MAX_TRAILING_STOP_PCT,
 )
 from exit_logic import evaluate_exit
@@ -243,3 +244,39 @@ def test_trailing_stop_takes_precedence_over_max_hold_when_both_apply():
     )
     assert decision.exit_reason is not None
     assert "Trailing Stop" in decision.exit_reason
+# ── Slow-bleed exit (drifting loser that never trips SL nor arms the trail) ──
+
+def test_slow_bleed_exits_after_min_hours():
+    # -1.2% after 1.2h held: below the 1.5% dynamic SL (fires at 1h decay) and
+    # never went +2% so the trailing stop never armed.
+    decision = _evaluate(avg_entry=100.0, price=98.8, held_hours=1.2,
+                         slow_bleed_pct=SLOW_BLEED_PCT, slow_bleed_min_hours=SLOW_BLEED_MIN_HOURS)
+    assert decision.exit_reason is not None
+    assert "Slow-bleed" in decision.exit_reason
+
+
+def test_slow_bleed_does_not_fire_before_min_hours():
+    decision = _evaluate(avg_entry=100.0, price=98.8, held_hours=0.5,
+                         slow_bleed_pct=SLOW_BLEED_PCT, slow_bleed_min_hours=SLOW_BLEED_MIN_HOURS)
+    assert decision.exit_reason is None
+
+
+def test_slow_bleed_does_not_fire_when_flat_or_up():
+    decision = _evaluate(avg_entry=100.0, price=99.95, held_hours=2.0,
+                         slow_bleed_pct=SLOW_BLEED_PCT, slow_bleed_min_hours=SLOW_BLEED_MIN_HOURS)
+    assert decision.exit_reason is None
+
+
+def test_slow_bleed_disabled_when_none():
+    # -0.8% at 2h: would trip slow-bleed if enabled, but dynamic SL is 1% so
+    # with the feature off the position keeps being held.
+    decision = _evaluate(avg_entry=100.0, price=99.2, held_hours=2.0,
+                         slow_bleed_pct=None, slow_bleed_min_hours=SLOW_BLEED_MIN_HOURS)
+    assert decision.exit_reason is None
+
+
+def test_full_stop_loss_still_wins_over_slow_bleed():
+    # -2.5% at 2.5h: dynamic SL (1%) fires first with its own reason, not slow-bleed.
+    decision = _evaluate(avg_entry=100.0, price=97.5, held_hours=2.5)
+    assert decision.exit_reason is not None
+    assert "Stop loss" in decision.exit_reason
