@@ -227,3 +227,89 @@ def test_features_on_returned_frame_match_train_style_computation(monkeypatch):
     train_features = add_features(df_full)[FEATURE_COLS].tail(SEQUENCE_LEN).reset_index(drop=True)
 
     pd.testing.assert_frame_equal(live_features, train_features, check_exact=False, atol=1e-9)
+
+
+# ── window anchoring ─────────────────────────────────────────────────────────
+#
+# Regression coverage for a live bug: the request used `limit=64` with no
+# `start`. Alpaca's default `start` is 00:00 UTC today (ascending), so the
+# bot got the FIRST 64 bars of the UTC day -- None before 08:00 UTC (fewer
+# than SEQUENCE_LEN bars; held positions went unmanaged) and a window frozen
+# at the 15:45 UTC bar after 16:00 UTC (the bot re-sent the same stale limit
+# price every cycle, which never filled). Confirmed against the live API on
+# 2026-10-05: the stuck BTC buy limit was exactly the 15:45 close x 1.001.
+
+def _fake_alpaca(now):
+    """A data client that applies Alpaca's documented defaults: start defaults
+    to 00:00 UTC of `now`'s day, results are ascending, `limit` truncates from
+    the oldest end. Serves one bar per 15m slot up to and including the bar
+    still forming at `now`."""
+    calls = []
+
+    def get_crypto_bars(req):
+        calls.append(req)
+        start = req.start or now.replace(hour=0, minute=0, second=0, microsecond=0)
+        if start.tzinfo is None:
+            start = start.replace(tzinfo=timezone.utc)
+        t = start + (-(start - datetime(2000, 1, 1, tzinfo=timezone.utc)) % timedelta(minutes=15))
+        bars = []
+        while t <= now:
+            bars.append(_fake_15m_bar(t, 100, 101, 99, 100 + len(bars) * 0.01, 1000, 100, 50))
+            t += timedelta(minutes=15)
+        if req.limit:
+            bars = bars[:req.limit]
+        res = MagicMock()
+        res.data = {req.symbol_or_symbols: bars}
+        return res
+
+    return MagicMock(get_crypto_bars=get_crypto_bars), calls
+
+
+def _freeze_now(monkeypatch, now):
+    import data_feeds
+
+    class _FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now if tz is not None else now.replace(tzinfo=None)
+
+    monkeypatch.setattr(data_feeds, "datetime", _FrozenDatetime)
+
+
+@pytest.mark.parametrize("hh, mm", [(3, 7), (8, 30), (12, 0), (16, 20), (20, 0), (23, 59)])
+def test_returns_latest_64_completed_bars_at_any_hour(monkeypatch, hh, mm):
+    """Before 08:00 UTC the old request returned None; after 16:00 UTC it
+    returned a window ending at 15:45. Both must now end at the most recent
+    COMPLETED bar."""
+    import data_feeds
+    now = datetime(2026, 10, 4, hh, mm, 30, tzinfo=timezone.utc)
+    client, _ = _fake_alpaca(now)
+    monkeypatch.setattr(data_feeds, "data_client", client)
+    _freeze_now(monkeypatch, now)
+
+    df = run_async(get_clean_ohlcv_dataframe("BTC/USD"))
+
+    floor = now.replace(minute=now.minute - now.minute % 15, second=0, microsecond=0)
+    last_completed_open = (floor - timedelta(minutes=15)).replace(tzinfo=None)
+    assert df is not None
+    assert len(df) == 64
+    assert df.index[-1] == last_completed_open
+    assert df.index.is_monotonic_increasing
+
+
+def test_request_anchors_start_to_trailing_window_not_day_start(monkeypatch):
+    import data_feeds
+    now = datetime(2026, 10, 4, 20, 0, 30, tzinfo=timezone.utc)
+    client, calls = _fake_alpaca(now)
+    monkeypatch.setattr(data_feeds, "data_client", client)
+    _freeze_now(monkeypatch, now)
+
+    run_async(get_clean_ohlcv_dataframe("BTC/USD"))
+
+    req = calls[0]
+    assert req.start is not None
+    start = req.start if req.start.tzinfo else req.start.replace(tzinfo=timezone.utc)
+    # far enough back for 64 bars plus gaps, and NOT today's 00:00 UTC
+    assert now - start >= timedelta(minutes=15 * 64)
+    # a `limit` would truncate from the oldest end and drop the newest bars
+    assert not req.limit

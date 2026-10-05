@@ -105,19 +105,23 @@ async def get_clean_ohlcv_dataframe(symbol):
     Returns None if data is insufficient (fewer than SEQUENCE_LEN valid bars).
     """
     try:
+        now_utc = datetime.now(timezone.utc)
+        # Alpaca's default `start` is 00:00 UTC today (ascending), so `limit=64`
+        # alone returns the FIRST 64 bars of the day -- no data before 08:00 UTC
+        # and a frozen window after 16:00 UTC. Ask for a trailing 24h instead
+        # and keep the newest 64 completed bars.
         req  = CryptoBarsRequest(
             symbol_or_symbols=symbol,
             timeframe=TimeFrame(15, TimeFrameUnit.Minute),
-            limit=64,
+            start=now_utc - timedelta(hours=24),
         )
         bars = await asyncio.to_thread(lambda: data_client.get_crypto_bars(req).data.get(symbol, []))
-        
+
         # Filter out the current incomplete bar by checking bar CLOSE time
         # (bar timestamp = bar open; a 15-min bar opened at 14:00 closes at 14:15)
         # We exclude any bar whose close time (open + 15 min) is in the future.
         bar_duration = timedelta(minutes=15)
-        now_utc = datetime.now(timezone.utc)
-        bars = [b for b in bars if b.timestamp + bar_duration <= now_utc]
+        bars = [b for b in bars if b.timestamp + bar_duration <= now_utc][-64:]
         
         if len(bars) < SEQUENCE_LEN:
             return None
