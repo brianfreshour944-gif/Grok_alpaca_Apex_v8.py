@@ -83,7 +83,10 @@ def _mock_position(symbol, market_value, qty, current_price, avg_entry_price):
 
 
 def _mock_filled_order(order_id="oid", filled_avg_price=None):
-    return MagicMock(id=order_id, filled_avg_price=filled_avg_price)
+    # commission=None: a bare MagicMock invents .commission and float() of it is
+    # 1.0, which orders.py would book as a phantom $1 fee. Real trading-API
+    # Orders have no commission field.
+    return MagicMock(id=order_id, filled_avg_price=filled_avg_price, commission=None)
 
 
 def test_sell_largest_position_sells_biggest_by_market_value(mock_trading_client):

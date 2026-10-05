@@ -34,7 +34,7 @@ def test_sanitize_price_rounds_down_not_to_nearest():
 
 def test_place_order_buy_success(mock_trading_client):
     fake_order = MagicMock(id="order-1")
-    fake_filled = MagicMock(id="order-1", filled_avg_price="100.05")
+    fake_filled = MagicMock(id="order-1", filled_avg_price="100.05", commission=None)
     mock_trading_client.submit_order.return_value = fake_order
     mock_trading_client.get_order_by_id.return_value = fake_filled
 
@@ -52,7 +52,7 @@ def test_place_order_sell_prices_below_market(mock_trading_client):
     fake_order = MagicMock(id="order-2")
     mock_trading_client.submit_order.return_value = fake_order
     mock_trading_client.get_order_by_id.return_value = MagicMock(
-        id="order-2", filled_qty="0.01", filled_avg_price="99.9",
+        id="order-2", filled_qty="0.01", filled_avg_price="99.9", commission=None,
     )
 
     result = run_async(place_order("BTC/USD", OrderSide.SELL, qty=0.01, price=100.0))
@@ -110,7 +110,7 @@ def test_place_order_returns_false_when_confirmed_unfilled(mock_trading_client, 
     mock_trading_client.submit_order.return_value = MagicMock(id="order-unfilled")
     # A real Alpaca response confirming zero fill (not an exception/timeout).
     mock_trading_client.get_order_by_id.return_value = MagicMock(
-        id="order-unfilled", filled_qty="0", filled_avg_price=None,
+        id="order-unfilled", filled_qty="0", filled_avg_price=None, commission=None,
     )
 
     result = run_async(place_order("BTC/USD", OrderSide.BUY, qty=0.01, price=100.0))
@@ -130,7 +130,7 @@ def test_sell_with_avg_entry_and_fill_records_realized_pnl(mock_trading_client, 
     fake_order = MagicMock(id="order-4")
     mock_trading_client.submit_order.return_value = fake_order
     mock_trading_client.get_order_by_id.return_value = MagicMock(
-        id="order-4", filled_avg_price="110.0",
+        id="order-4", filled_avg_price="110.0", commission=None,
     )
 
     result = run_async(place_order("BTC/USD", OrderSide.SELL, qty=2.0, price=109.9, avg_entry=100.0))
@@ -149,7 +149,7 @@ def test_buy_never_records_realized_pnl(mock_trading_client, monkeypatch):
 
     mock_trading_client.submit_order.return_value = MagicMock(id="order-5")
     mock_trading_client.get_order_by_id.return_value = MagicMock(
-        id="order-5", filled_avg_price="100.1",
+        id="order-5", filled_avg_price="100.1", commission=None,
     )
 
     run_async(place_order("BTC/USD", OrderSide.BUY, qty=1.0, price=100.0, avg_entry=95.0))
@@ -169,7 +169,7 @@ def test_sell_without_avg_entry_does_not_record_realized_pnl(mock_trading_client
 
     mock_trading_client.submit_order.return_value = MagicMock(id="order-6")
     mock_trading_client.get_order_by_id.return_value = MagicMock(
-        id="order-6", filled_avg_price="110.0",
+        id="order-6", filled_avg_price="110.0", commission=None,
     )
 
     run_async(place_order("BTC/USD", OrderSide.SELL, qty=2.0, price=109.9))  # no avg_entry
