@@ -19,3 +19,7 @@ __pycache__/
 
 # Jupyter/Colab specific
 .ipynb_checkpoints/
+
+# Backtest output (backtest_apex.py)
+bt_cache/
+bt_results/
