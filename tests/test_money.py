@@ -4,7 +4,7 @@ import pytest
 
 from money import (
     to_dec, mul, div, pct_change_x100, weighted_avg,
-    pnl_dollar, pnl_pct_fraction, qty, money, realized_pnl, estimated_fee,
+    pnl_dollar, pnl_pct_fraction, net_pnl_pct, qty, money, realized_pnl, estimated_fee,
 )
 
 
@@ -126,3 +126,30 @@ def test_estimated_fee_non_positive_notional_is_zero():
 def test_estimated_fee_uses_decimal_precision():
     # 0.333 * 25 / 10000 = 0.0008325 exactly
     assert estimated_fee(0.333, 25.0) == pytest.approx(0.0008325)
+
+
+# ── net_pnl_pct: gross move minus the estimated round-trip fee ──
+
+def test_net_pnl_pct_subtracts_the_estimated_fee():
+    # 10% gross move, 25 bps round-trip estimate -> 0.0975
+    assert net_pnl_pct(100.0, 110.0, 25.0) == pytest.approx(0.10 - 0.0025)
+
+
+def test_net_pnl_pct_is_below_the_gross_fraction():
+    assert net_pnl_pct(100.0, 110.0, 25.0) < pnl_pct_fraction(100.0, 110.0)
+
+
+def test_net_pnl_pct_equals_gross_when_fee_is_zero():
+    assert net_pnl_pct(100.0, 110.0, 0.0) == pytest.approx(0.10)
+
+
+def test_net_pnl_pct_zero_entry_returns_gross_fraction_without_dividing():
+    # Non-positive entry: no notional to net against, so fall back to gross
+    # (0.0) rather than raising ZeroDivisionError.
+    assert net_pnl_pct(0.0, 110.0, 25.0) == 0.0
+
+
+def test_net_pnl_pct_can_turn_a_small_gain_negative():
+    # A 0.1% gross move is smaller than the 25 bps fee -> net is negative, which
+    # is the point: it stops reporting tiny wins as profitable.
+    assert net_pnl_pct(100.0, 100.1, 25.0) < 0

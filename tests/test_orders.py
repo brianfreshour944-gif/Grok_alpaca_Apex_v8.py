@@ -142,7 +142,8 @@ def test_sell_with_avg_entry_and_fill_records_realized_pnl(mock_trading_client, 
     assert recorded["fee"] == pytest.approx(1.05)
     assert recorded["commission_estimated"] is True
     assert recorded["realized_pnl"] == pytest.approx(20.0 - 1.05)   # (110-100)*2 - 1.05
-    assert recorded["realized_pnl_pct"] == pytest.approx(0.10)  # 10% vs avg_entry (gross pct, unchanged)
+    # pct is now NET of the estimated round-trip fee too: 0.10 - 25bps = 0.0975
+    assert recorded["realized_pnl_pct"] == pytest.approx(0.10 - 0.0025)
 
 
 def test_buy_never_records_realized_pnl(mock_trading_client, monkeypatch):
@@ -342,10 +343,12 @@ def test_buy_never_records_an_estimated_fee(mock_trading_client, monkeypatch):
 def test_partial_fill_fee_and_pnl_use_the_filled_qty(mock_trading_client, monkeypatch):
     """A market sell can fill only part of the requested qty. Fee and realized
     PnL must be computed on the FILLED qty (0.4), not the requested qty (1.0) --
-    otherwise the exit leg is over-charged and PnL is understated."""
+    otherwise the exit leg is over-charged and PnL is understated. The exchange's
+    filled qty is also handed to record_trade so the stored row reflects it."""
     import orders
     recorded = {}
-    monkeypatch.setattr(orders, "record_trade", lambda *a, **kw: recorded.update(kw))
+    monkeypatch.setattr(orders, "record_trade",
+                        lambda *a, **kw: recorded.update(kw, _args=a, _kw=kw))
 
     mock_trading_client.submit_order.return_value = MagicMock(id="part-1")
     mock_trading_client.get_order_by_id.return_value = MagicMock(
@@ -355,10 +358,46 @@ def test_partial_fill_fee_and_pnl_use_the_filled_qty(mock_trading_client, monkey
     run_async(place_order("BTC/USD", OrderSide.SELL, qty=1.0, price=109.9, avg_entry=100.0))
 
     # Round-trip notional on 0.4: (110 + 100) * 0.4 = 84; fee = 84 * 25bps = 0.21
+    assert recorded["filled_qty"] == pytest.approx(0.4)  # what record_trade stores
     assert recorded["fee"] == pytest.approx(0.21)
     assert recorded["commission_estimated"] is True
     # Realized PnL on 0.4: (110 - 100) * 0.4 - 0.21
     assert recorded["realized_pnl"] == pytest.approx(10 * 0.4 - 0.21)
+
+
+def test_full_fill_passes_the_filled_qty_to_record_trade(mock_trading_client, monkeypatch):
+    import orders
+    recorded = {}
+    monkeypatch.setattr(orders, "record_trade",
+                        lambda *a, **kw: recorded.update(kw, _args=a, _kw=kw))
+
+    mock_trading_client.submit_order.return_value = MagicMock(id="full-1")
+    mock_trading_client.get_order_by_id.return_value = MagicMock(
+        id="full-1", filled_qty="2.0", filled_avg_price="110.0", commission=None,
+    )
+    run_async(place_order("BTC/USD", OrderSide.SELL, qty=2.0, price=109.9, avg_entry=100.0))
+    assert recorded["filled_qty"] == pytest.approx(2.0)
+
+
+def test_realized_pnl_pct_is_net_of_estimated_fee(mock_trading_client, monkeypatch):
+    """The percentage must agree with the fee-netted dollar PnL: gross move back
+    out the estimated round-trip fee (25 bps here), not the raw price move."""
+    import config
+    import orders
+    recorded = {}
+    monkeypatch.setattr(orders, "record_trade", lambda *a, **kw: recorded.update(kw))
+
+    mock_trading_client.submit_order.return_value = MagicMock(id="pct-1")
+    mock_trading_client.get_order_by_id.return_value = MagicMock(
+        id="pct-1", filled_qty="1.0", filled_avg_price="110.0", commission=None,
+    )
+    run_async(place_order("BTC/USD", OrderSide.SELL, qty=1.0, price=109.9, avg_entry=100.0))
+
+    gross = (110.0 - 100.0) / 100.0                       # 0.10
+    expected = gross - config.ESTIMATED_TAKER_FEE_BPS / 10000  # - 0.0025
+    assert recorded["realized_pnl_pct"] == pytest.approx(expected)
+    # and it is strictly less than the gross percentage
+    assert recorded["realized_pnl_pct"] < gross
 
 
 def test_sell_without_avg_entry_estimates_only_the_exit_leg(mock_trading_client, monkeypatch):

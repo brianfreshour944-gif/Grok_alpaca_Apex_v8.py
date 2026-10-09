@@ -234,7 +234,7 @@ def load_bot_state():
 
 
 def record_trade(bot_name, symbol, side, qty, price, order_id=None, fee=0.0, fill_price=None,
-                  realized_pnl=None, realized_pnl_pct=None, commission_estimated=False):
+                  filled_qty=None, realized_pnl=None, realized_pnl_pct=None, commission_estimated=False):
     """
     Log a completed trade to the trades table.
 
@@ -244,6 +244,11 @@ def record_trade(bot_name, symbol, side, qty, price, order_id=None, fee=0.0, fil
 
     commission_estimated flags `fee` as an ESTIMATED taker fee rather than an
     exchange-reported commission (the exchange reports none).
+
+    filled_qty, when the exchange reported one, is the qty that ACTUALLY traded
+    and is stored (and used for `value`) in place of the requested `qty`: on a
+    partial fill the requested qty would overstate the position. Falls back to
+    `qty` when absent or non-positive (BUYs, and fills the exchange never sized).
     """
     db_url = os.getenv("DATABASE_URL")
     if not db_url:
@@ -252,7 +257,8 @@ def record_trade(bot_name, symbol, side, qty, price, order_id=None, fee=0.0, fil
     try:
         with psycopg2.connect(db_url) as conn:
             with conn.cursor() as cur:
-                value = (fill_price or price or 0.0) * qty
+                stored_qty = float(filled_qty) if filled_qty and float(filled_qty) > 0 else qty
+                value = (fill_price or price or 0.0) * stored_qty
                 actual_fill_price = fill_price if fill_price else (price or 0.0)
                 cur.execute("""
                     INSERT INTO trades
@@ -260,7 +266,7 @@ def record_trade(bot_name, symbol, side, qty, price, order_id=None, fee=0.0, fil
                          value, fee, fill_price, commission_estimated, order_id,
                          realized_pnl, realized_pnl_pct, timestamp)
                     VALUES (%s, 'Alpaca', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
-                """, (bot_name, symbol, side, price or 0.0, qty, value,
+                """, (bot_name, symbol, side, price or 0.0, stored_qty, value,
                       float(fee), float(actual_fill_price), bool(commission_estimated),
                       str(order_id) if order_id else None,
                       float(realized_pnl) if realized_pnl is not None else None,
@@ -268,7 +274,7 @@ def record_trade(bot_name, symbol, side, qty, price, order_id=None, fee=0.0, fil
             conn.commit()
             pnl_str = f" | Realized PnL: ${realized_pnl:.2f}" if realized_pnl is not None else ""
             est_str = " (est)" if commission_estimated else ""
-            logger.info(f"Recorded trade: {side} {symbol} | Qty: {qty:.6f} | Price: {price} | Fill: {actual_fill_price} | Fee: ${float(fee):.4f}{est_str}{pnl_str}")
+            logger.info(f"Recorded trade: {side} {symbol} | Qty: {stored_qty:.6f} | Price: {price} | Fill: {actual_fill_price} | Fee: ${float(fee):.4f}{est_str}{pnl_str}")
     except Exception as e:
         logger.error(f"DB Error: {e}")
 

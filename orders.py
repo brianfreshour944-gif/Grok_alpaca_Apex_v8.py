@@ -12,7 +12,7 @@ from database import record_trade
 from api_utils import call_with_rate_limit_handling_async
 from money import (
     realized_pnl as calc_realized_pnl,
-    pnl_pct_fraction as calc_pnl_pct,
+    net_pnl_pct as calc_net_pnl_pct,
     estimated_fee as calc_estimated_fee,
 )
 
@@ -115,6 +115,7 @@ async def place_order(symbol: str, side: OrderSide, qty: float, price: float = N
         )
         if order_id_out is not None:
             order_id_out["order_id"] = str(getattr(order, "id", None))
+            order_id_out["requested_qty"] = qty
         
         # Fetch actual fill details from exchange for accurate fee/slippage tracking.
         # CRITICAL FIX: Limit orders may not fill immediately. We must wait for
@@ -167,6 +168,12 @@ async def place_order(symbol: str, side: OrderSide, qty: float, price: float = N
 
         except Exception as fill_err:
             logger.warning(f"Could not fetch fill details for order {order.id}: {fill_err}")
+
+        if order_id_out is not None:
+            # Actual filled qty (0.0 when the exchange reported none). Callers
+            # use this to tell a full fill from a partial one instead of
+            # trusting a lagging position re-read.
+            order_id_out["filled_qty"] = actual_filled_qty
 
         # Distinguish "we confirmed the order did NOT fill" from "we never
         # managed to confirm anything." filled_order is only non-None when
@@ -222,12 +229,18 @@ async def place_order(symbol: str, side: OrderSide, qty: float, price: float = N
         realized_pnl_pct = None
         if side == OrderSide.SELL and avg_entry is not None and actual_fill_price is not None:
             realized_pnl_dollar = calc_realized_pnl(avg_entry, actual_fill_price, filled_qty_used, fee=actual_fee)
-            realized_pnl_pct = calc_pnl_pct(avg_entry, actual_fill_price)
+            # NET of the estimated round-trip fee (entry + exit legs), so the
+            # percentage agrees with the fee-netted dollar PnL above.
+            realized_pnl_pct = calc_net_pnl_pct(avg_entry, actual_fill_price, ESTIMATED_TAKER_FEE_BPS)
 
+        # Pass the qty that ACTUALLY filled so record_trade stores it (and values
+        # it) instead of the qty requested: on a partial fill the requested qty
+        # would overstate the position and the fee/PnL computed against it.
         await asyncio.to_thread(
             record_trade,
             BOT_NAME, symbol, side.value, qty, price,
             order_id=order.id, fee=actual_fee, fill_price=actual_fill_price,
+            filled_qty=actual_filled_qty or None,
             realized_pnl=realized_pnl_dollar, realized_pnl_pct=realized_pnl_pct,
             commission_estimated=commission_estimated,
         )

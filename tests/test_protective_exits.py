@@ -25,10 +25,11 @@ def _pos(symbol, qty, market_value):
     return SimpleNamespace(symbol=symbol, qty=qty, market_value=market_value)
 
 
-def _patch_exit_paths(monkeypatch, positions_seq, place_results):
+def _patch_exit_paths(monkeypatch, positions_seq, place_results, client=None):
     """positions_seq: successive position LISTS returned by live-position
-    lookups ('ERROR' makes the lookup raise). place_results: bools for
-    successive place_order calls. Returns a dict recording the calls."""
+    lookups ('ERROR' makes the lookup raise). place_results: entries for
+    successive place_order calls -- True/False, or {"ok":bool, "filled":qty}
+    to control the reported fill. Returns a dict recording the calls."""
     import main_bot
 
     calls = {"positions": 0, "orders": []}
@@ -46,11 +47,24 @@ def _patch_exit_paths(monkeypatch, positions_seq, place_results):
         get_all_positions = staticmethod(fake_get_all_positions)
 
     async def fake_place_order(symbol, side, qty, price, **kw):
+        res = next(order_iter, False)
+        if isinstance(res, dict):
+            ok = res.get("ok", True)
+            filled = res.get("filled", qty)
+        else:
+            ok = bool(res)
+            filled = qty
+        oid_out = kw.get("order_id_out")
+        if oid_out is not None:
+            oid_out["order_id"] = "oid-1"
+            oid_out["requested_qty"] = qty
+            oid_out["filled_qty"] = filled if ok else 0.0
         calls["orders"].append({"symbol": symbol, "qty": qty, **kw})
-        return next(order_iter, False)
+        return ok
 
-    monkeypatch.setattr(main_bot, "trading_client", FakeClient())
+    monkeypatch.setattr(main_bot, "trading_client", client or FakeClient())
     monkeypatch.setattr(main_bot, "place_order", fake_place_order)
+    monkeypatch.setattr(main_bot, "POSITION_SETTLE_DELAY", 0.0)  # no real sleeps
     return calls
 
 
@@ -146,6 +160,82 @@ def test_retry_partial_exit_bounded_attempts(monkeypatch):
     ok = run_async(main_bot.retry_partial_exit("BTC/USD", 100.0, 100.0, "Stop loss", max_attempts=3))
     assert ok is False              # residual remained -> not done
     assert len(calls["orders"]) == 3  # bounded by max_attempts
+
+
+# ── position-fetch lag: a reported full fill is not contradicted by an
+#    immediate stale position read ──────────────────────────────────────────
+
+def test_full_fill_with_stale_position_does_not_sell_again(monkeypatch):
+    # place_order reported the whole 1.0 filled. The first position re-read is
+    # stale (still shows 1.0), but the next settle read shows flat. No second
+    # sell may be submitted.
+    oid = {"order_id": "x", "requested_qty": 1.0, "filled_qty": 1.0}
+    calls = _patch_exit_paths(
+        monkeypatch,
+        positions_seq=[[_pos("BTCUSD", 1.0, 100.0)], []],  # stale, then flat
+        place_results=[],
+    )
+    import main_bot
+    ok = run_async(main_bot.retry_partial_exit("BTC/USD", 100.0, 100.0, "Stop loss", order_id_out=oid))
+    assert ok is True
+    assert calls["orders"] == []          # no double-sell
+    assert calls["positions"] >= 2        # it did wait before trusting the read
+
+
+def test_full_fill_stale_for_the_whole_settle_window_then_retries(monkeypatch):
+    # Reported full fill but the position genuinely still shows stock even after
+    # the settle window: then (and only then) treat it as a real remainder.
+    calls = _patch_exit_paths(
+        monkeypatch,
+        positions_seq=[
+            [_pos("BTCUSD", 1.0, 100.0)],  # initial read
+            [_pos("BTCUSD", 1.0, 100.0)],  # settle 1
+            [_pos("BTCUSD", 1.0, 100.0)],  # settle 2
+            [_pos("BTCUSD", 1.0, 100.0)],  # settle 3
+            [],                            # flat after the retry
+        ],
+        place_results=[{"ok": True, "filled": 1.0}],
+    )
+    import main_bot
+    oid = {"order_id": "x", "requested_qty": 1.0, "filled_qty": 1.0}
+    ok = run_async(main_bot.retry_partial_exit("BTC/USD", 100.0, 100.0, "Stop loss", order_id_out=oid))
+    assert ok is True
+    assert len(calls["orders"]) == 1
+    assert calls["orders"][0]["qty"] == pytest.approx(1.0)
+
+
+def test_partial_fill_proceeds_without_waiting(monkeypatch):
+    # filled 0.4 < requested 1.0 => NOT a full fill, so no settle wait: the 0.6
+    # remainder is retried right away (the second buy of an already-partial fill).
+    calls = _patch_exit_paths(
+        monkeypatch,
+        positions_seq=[[_pos("BTCUSD", 0.6, 60.0)], []],
+        place_results=[{"ok": True, "filled": 0.6}],
+    )
+    import main_bot
+    oid = {"order_id": "x", "requested_qty": 1.0, "filled_qty": 0.4}
+    ok = run_async(main_bot.retry_partial_exit("BTC/USD", 100.0, 100.0, "Stop loss", order_id_out=oid))
+    assert ok is True
+    assert calls["positions"] == 2            # read, retry, read -> no settle polls
+    assert calls["orders"][0]["qty"] == pytest.approx(0.6)
+
+
+def test_unreported_fill_qty_is_not_treated_as_full(monkeypatch):
+    # If the exchange never reported a fill qty (filled 0.0), we cannot claim a
+    # full fill, so a non-flat position read is acted on immediately -- no
+    # settle wait. max_attempts=1 isolates the first decision.
+    calls = _patch_exit_paths(
+        monkeypatch,
+        positions_seq=[[_pos("BTCUSD", 1.0, 100.0)]],
+        place_results=[{"ok": True, "filled": 1.0}],
+    )
+    import main_bot
+    oid = {"order_id": "x", "requested_qty": 1.0, "filled_qty": 0.0}
+    ok = run_async(main_bot.retry_partial_exit("BTC/USD", 100.0, 100.0, "Stop loss", order_id_out=oid, max_attempts=1))
+    assert ok is False
+    assert len(calls["orders"]) == 1
+    # one initial read + one final read; no settle polls (which would be +3)
+    assert calls["positions"] == 2
 
 
 def test_exit_branch_calls_retry_partial_exit_for_protective_sells():

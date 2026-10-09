@@ -73,6 +73,34 @@ def test_record_trade_buy_has_null_realized_pnl(mock_db):
     assert row["realized_pnl_pct"] is None
 
 
+def test_record_trade_stores_the_filled_qty_on_a_partial_fill(mock_db):
+    """The stored quantity (and the value derived from it) must be the qty that
+    actually filled, not the qty requested -- otherwise a partial fill inflates
+    the position and the value column."""
+    database.record_trade(
+        "bot", "BTC/USD", "sell", 1.0, 109.9, order_id="oid-part",
+        fee=0.21, fill_price=110.0, filled_qty=0.4,
+    )
+    sql, values = _last_insert_trades_call(mock_db)
+    columns = [c.strip() for c in sql.split("(", 1)[1].split(")", 1)[0].split(",")]
+    placeholder_cols = [c for c in columns if c not in {"exchange", "timestamp"}]
+    row = dict(zip(placeholder_cols, values))
+    assert row["quantity"] == pytest.approx(0.4)
+    assert row["value"] == pytest.approx(110.0 * 0.4)
+
+
+def test_record_trade_falls_back_to_requested_qty_when_no_fill_qty(mock_db):
+    database.record_trade(
+        "bot", "BTC/USD", "buy", 1.5, 100.0, order_id="oid-no-fill",
+        fee=0.0, fill_price=100.0,
+    )
+    sql, values = _last_insert_trades_call(mock_db)
+    columns = [c.strip() for c in sql.split("(", 1)[1].split(")", 1)[0].split(",")]
+    placeholder_cols = [c for c in columns if c not in {"exchange", "timestamp"}]
+    row = dict(zip(placeholder_cols, values))
+    assert row["quantity"] == pytest.approx(1.5)
+
+
 def test_record_trade_is_a_noop_without_database_url(monkeypatch):
     monkeypatch.delenv("DATABASE_URL", raising=False)
     mock_connect = MagicMock()

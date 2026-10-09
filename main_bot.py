@@ -262,6 +262,14 @@ def is_protective_exit(exit_reason: str) -> bool:
     )
 
 
+# How long retry_partial_exit waits for the exchange to reflect a just-submitted
+# sell before trusting a position read enough to act on it. A crypto market
+# order's fill can lag a position re-read for a moment; acting immediately would
+# re-sell qty that is already gone (and after a full fill, double-sell).
+POSITION_SETTLE_ATTEMPTS = 3
+POSITION_SETTLE_DELAY = 2.0  # seconds between settlement reads
+
+
 async def _live_position(symbol: str):
     """Return (qty, market_value) for `symbol` on the exchange, or None when the
     lookup itself failed or returned bad data.
@@ -310,12 +318,42 @@ async def retry_partial_exit(symbol: str, price: float, avg_entry: float,
     when the position cannot be confirmed flat -- a residual remains, a retry
     was rejected/failed, or the position lookup failed -- so the caller treats
     the exit as NOT done and retries it next loop.
+
+    Position-fetch lag: if place_order saw a FULL fill (filled_qty >= the qty
+    requested), an immediate position re-read may still show the pre-sell qty
+    because the exchange has not updated. Trusting that stale read would
+    double-sell. So a read that disagrees with a reported full fill is polled
+    (POSITION_SETTLE_ATTEMPTS x POSITION_SETTLE_DELAY) before it is believed;
+    the extra lookups happen only in that disagreement case, so the common
+    flat-on-first-read path costs exactly one read.
     """
+    requested = (order_id_out or {}).get("requested_qty")
+    filled = (order_id_out or {}).get("filled_qty")
+    # A full fill is only claimed when the exchange told us how much filled.
+    reported_full_fill = (
+        filled is not None and requested is not None
+        and float(filled) + 1e-12 >= float(requested)
+    )
+
     for attempt in range(1, max_attempts + 1):
         info = await _live_position(symbol)
         if info is None:
             return False  # cannot confirm flat -> keep the exit retrying
         remaining, remaining_value = info
+
+        if reported_full_fill and remaining > 0:
+            # place_order said the whole qty filled but the position still shows
+            # stock: assume a lagging read and wait for the exchange to settle
+            # before concluding there is a genuine remainder.
+            for _ in range(POSITION_SETTLE_ATTEMPTS):
+                await asyncio.sleep(POSITION_SETTLE_DELAY)
+                info = await _live_position(symbol)
+                if info is None:
+                    return False
+                remaining, remaining_value = info
+                if remaining <= 0:
+                    break
+
         if remaining <= 0:
             return True  # flat
         if remaining_value < MIN_ORDER_USD:
@@ -331,12 +369,18 @@ async def retry_partial_exit(symbol: str, price: float, avg_entry: float,
             f"remaining {remaining:.8f} (~${remaining_value:.2f}) "
             f"[attempt {attempt}/{max_attempts}]"
         )
+        requested = remaining
+        order_id_out = order_id_out if order_id_out is not None else {}
         ok = await place_order(
             symbol, OrderSide.SELL, remaining, price,
             avg_entry=avg_entry, order_id_out=order_id_out, market=True,
         )
         if not ok:
             return False
+        filled = order_id_out.get("filled_qty")
+        reported_full_fill = (
+            filled is not None and float(filled) + 1e-12 >= float(requested)
+        )
 
     # Attempts exhausted without an observed flat position; one final check.
     info = await _live_position(symbol)

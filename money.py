@@ -117,3 +117,19 @@ def pnl_pct_fraction(avg_entry, current_price) -> float:
     if old_d == 0:
         return 0.0
     return float((new_d - old_d) / old_d)
+
+
+def net_pnl_pct(avg_entry, exit_price, fee_bps) -> float:
+    """
+    Realized PnL as a FRACTION of entry notional, NET of an ESTIMATED round-trip
+    taker fee: (exit - entry)/entry - fee_bps/10000. The fee is charged on both
+    legs (entry + exit), and for a small move the entry and exit notionals are
+    close enough that a single per-leg bps deduction is the right order of
+    magnitude. Returns the GROSS fraction when avg_entry is non-positive (no
+    notional to net against), so callers never divide by zero.
+    """
+    old_d = to_dec(avg_entry)
+    if old_d == 0:
+        return pnl_pct_fraction(avg_entry, exit_price)
+    gross = (to_dec(exit_price) - old_d) / old_d
+    return float(gross - to_dec(fee_bps) / Decimal(10000))
