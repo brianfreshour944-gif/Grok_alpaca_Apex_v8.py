@@ -116,3 +116,91 @@ or lower costs -- not a bigger model:
 - One 555-day realisation; a single bull/bear mix.
 - Orderbook whale filter not modelled.
 - Survivorship-biased 10-symbol pool.
+
+---
+
+# Funding / better-inputs investigation (the likely-winner lever)
+
+Follow-on to the section above: of the three levers (better inputs / lower
+costs / rolling retrain), **better inputs** was the most promising. The single
+most likely winner within that is **derivative funding / positioning**, which is
+a documented multi-day signal and is *not* in the current feature set. I pursued
+it end to end.
+
+## Data
+
+- OKX's `funding-rate-history` endpoint only exposes ~100 days.
+- **Binance USDT-M monthly archives** (`data.binance.vision/data/futures/um/
+  monthly/fundingRate/<SYM>USDT/...zip`) return full history: 1,644 hourly rows
+  per symbol, 2025-04-01 -> 2026-09-30. 8-hour settlements.
+- `api.binance.com` is geo-blocked here (HTTP 451); the Vision archive host and
+  `www.okx.com` both work. Fetch is in `research/funding_probe.py::fetch_funding`.
+
+## Funding features tested
+
+`funding`, `funding_z` (30-settlement z-score), `funding_cum_7d`, `funding_cum_14d`,
+plus cross-sectional `xs_fund_rank` and `xs_fund_z` (rank across the universe).
+
+## Result 1 -- funding helps prediction at MULTI-DAY horizons
+
+Walk-forward OOS AUC / IC, base 11 features vs base + funding:
+
+| horizon | base AUC | base IC | +funding AUC | +funding IC |
+|---|---|---|---|---|
+| 8h (32 bars) | 0.504 | +0.005 | 0.513 | +0.023 |
+| 24h | 0.507 | +0.012 | 0.505 | +0.004 |
+| 72h | 0.511 | +0.031 | **0.528** | **+0.057** |
+| 168h (7d) | 0.525 | +0.055 | **0.535** | **+0.084** |
+
+Funding is the wrong timescale for the bot's 2h holds; it pays off over days.
+
+## Result 2 -- the eye-catching number is BETA, not timing
+
+At 72h the top-decile forward return was +146 bps vs +29 bps base (+117 bps
+"alpha", 58.9% hit, AUC 0.544). But a **circular timing-alpha null** (shifting
+the return series against the predictions) gives **p = 0.75** -- shifted
+alignments produce alphas as large by chance, because 72h crypto trends hard and
+the model is long-biased. Almost all of that "+117 bps" is market beta.
+
+## Result 3 -- the beta-free arbiter (market-neutral long-short)
+
+Non-overlapping, every H bars: rank symbols by model prob, long top-3 / short
+bottom-3, equal weight. Beta cancels; a positive number is a genuine timing edge.
+
+| horizon | config | n | gross bps | net (-50bps/leg) | t (net) |
+|---|---|---|---|---|---|
+| 72h | base | 93 | -23.2 | -123.2 | -4.08 |
+| 72h | +funding | 88 | -1.8 | -101.8 | -2.84 |
+| 168h | base | 40 | -67.0 | -167.0 | -2.39 |
+| 168h | **+funding** | 38 | **+90.3** | **-9.7** | -0.14 |
+
+Funding produces the **best candidate found in this whole investigation**: a
+7-day market-neutral long-short at **+90 bps gross**. But:
+- only **38 non-overlapping observations** (gross t ~ 1.3) -- not significant;
+- after one round-trip of cost it is ~break-even (-10 bps), not profitable;
+- the bot trades 2h holds, so capturing an edge that lives at 7 days would
+  require a different holding period and a market-neutral book (a different
+  strategy, not the current one).
+
+## Conclusion
+
+Funding/positioning is a *real* signal but it lives at the multi-day horizon and
+is small once beta and costs are removed. It does not turn the current
+short-horizon, long-only bot into a winning strategy. The honest ranking of
+levers, after testing all three:
+
+1. Better inputs (funding, cross-sectional): real but small; best case ~+90 bps
+   gross at 7d with too few observations to trust.
+2. Lower costs (maker): necessary but not sufficient (gross-negative at default
+   threshold even at 0 fees).
+3. Rolling retrain: keeps IC honest but cannot manufacture edge that isn't there.
+
+A genuinely winning strategy would need to be a different one: multi-day,
+market-neutral, funding/positioning-driven, maker-executed. That is a new
+project, not a tweak to this bot.
+
+## Files
+
+- `research/funding_probe.py` -- fetch + funding features + the three tests above.
+- Funding cache lives in `bt_cache/funding/` (gitignored).
+- Not promoted; no `config.py` change; nothing pushed.
