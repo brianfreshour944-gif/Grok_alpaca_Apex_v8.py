@@ -23,3 +23,7 @@ __pycache__/
 # Backtest output (backtest_apex.py)
 bt_cache/
 bt_results/
+perp_cache/
+spot_cache/
+forward_ledger.csv
+okx_cache/
