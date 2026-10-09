@@ -4,6 +4,7 @@
 # the values tuple, and that the right values land in the right columns --
 # not just that some INSERT statement is present in the source text.
 
+import os
 from unittest.mock import MagicMock
 
 import pytest
@@ -78,6 +79,126 @@ def test_record_trade_is_a_noop_without_database_url(monkeypatch):
     monkeypatch.setattr(database.psycopg2, "connect", mock_connect)
     database.record_trade("bot", "BTC/USD", "sell", 1.0, 100.0)
     assert not mock_connect.called
+
+
+def test_record_trade_persists_commission_estimated_flag(mock_db):
+    database.record_trade(
+        "bot", "BTC/USD", "sell", 1.0, 100.0,
+        order_id="oid-est", fee=0.5, fill_price=101.0,
+        realized_pnl=19.5, realized_pnl_pct=0.1, commission_estimated=True,
+    )
+    sql, values = _last_insert_trades_call(mock_db)
+    columns = [c.strip() for c in sql.split("(", 1)[1].split(")", 1)[0].split(",")]
+    placeholder_cols = [c for c in columns if c not in {"exchange", "timestamp"}]
+    row = dict(zip(placeholder_cols, values))
+    assert row["commission_estimated"] is True
+    assert row["fee"] == pytest.approx(0.5)
+
+
+def test_record_trade_defaults_commission_estimated_to_false(mock_db):
+    database.record_trade("bot", "BTC/USD", "buy", 1.0, 100.0, order_id="oid-plain")
+    sql, values = _last_insert_trades_call(mock_db)
+    columns = [c.strip() for c in sql.split("(", 1)[1].split(")", 1)[0].split(",")]
+    placeholder_cols = [c for c in columns if c not in {"exchange", "timestamp"}]
+    row = dict(zip(placeholder_cols, values))
+    assert row["commission_estimated"] is False
+
+
+# ── backfill_trade_if_missing: estimated fee on crash-recovery rows ──
+
+def _backfill_insert_row(mock_db):
+    sql, values = _last_insert_trades_call(mock_db)
+    columns = [c.strip() for c in sql.split("(", 1)[1].split(")", 1)[0].split(",")]
+    placeholder_cols = [c for c in columns if c not in {"exchange", "timestamp"}]
+    return dict(zip(placeholder_cols, values))
+
+
+def test_backfill_estimates_fee_when_exchange_reports_none(mock_db):
+    from types import SimpleNamespace
+    # No commission attribute -> exchange-reported fee is absent.
+    order = SimpleNamespace(
+        id="bf-1", filled_qty="2.0", filled_avg_price="110.0",
+        side="sell", symbol="BTCUSD", created_at=None,
+    )
+    mock_db.fetchone.return_value = None  # not already recorded
+    assert database.backfill_trade_if_missing(order) is True
+
+    row = _backfill_insert_row(mock_db)
+    # 110 * 2 * 25 bps = 0.55 estimated
+    assert row["fee"] == pytest.approx(0.55)
+    assert row["commission_estimated"] is True
+
+
+def test_backfill_keeps_exchange_reported_commission_when_present(mock_db):
+    from types import SimpleNamespace
+    order = SimpleNamespace(
+        id="bf-2", filled_qty="2.0", filled_avg_price="110.0", commission="1.23",
+        side="sell", symbol="BTCUSD", created_at=None,
+    )
+    mock_db.fetchone.return_value = None
+    assert database.backfill_trade_if_missing(order) is True
+
+    row = _backfill_insert_row(mock_db)
+    assert row["fee"] == pytest.approx(1.23)
+    assert row["commission_estimated"] is False
+
+
+def test_backfill_skips_when_row_already_exists(mock_db):
+    from types import SimpleNamespace
+    order = SimpleNamespace(
+        id="bf-3", filled_qty="1.0", filled_avg_price="100.0",
+        side="buy", symbol="BTCUSD", created_at=None,
+    )
+    mock_db.fetchone.return_value = (1,)  # already recorded
+    assert database.backfill_trade_if_missing(order) is False
+
+
+# ── commission_estimated migration against a REAL Postgres ──
+# Opt-in: set TEST_DATABASE_URL to a throwaway database (e.g.
+# "postgresql://apex:apex@localhost:5432/apex_test"). Skipped by default so the
+# suite needs no Postgres, but runnable to prove the migration is additive and
+# idempotent against a pre-existing trades table that already holds rows.
+
+@pytest.mark.skipif(
+    not os.getenv("TEST_DATABASE_URL"),
+    reason="set TEST_DATABASE_URL to run the real-Postgres migration test",
+)
+def test_commission_estimated_migration_is_additive_and_idempotent(monkeypatch):
+    import psycopg2
+    db = os.environ["TEST_DATABASE_URL"]
+    monkeypatch.setenv("DATABASE_URL", db)
+
+    with psycopg2.connect(db) as conn, conn.cursor() as cur:
+        cur.execute("DROP TABLE IF EXISTS trades")
+        cur.execute("""CREATE TABLE trades (
+            id SERIAL PRIMARY KEY, bot_name TEXT, exchange TEXT, symbol TEXT,
+            side TEXT, price REAL, quantity REAL, value REAL, fee REAL,
+            fill_price REAL, order_id TEXT, timestamp TIMESTAMP)""")
+        cur.execute("""INSERT INTO trades
+            (bot_name,exchange,symbol,side,price,quantity,value,fee,fill_price,order_id,timestamp)
+            VALUES ('b','Alpaca','BTC/USD','sell',100,1,100,0.0,101,'old-1',NOW()),
+                   ('b','Alpaca','ETH/USD','buy',50,2,100,0.0,50,'old-2',NOW())""")
+        conn.commit()
+        cur.execute("""SELECT column_name FROM information_schema.columns
+                       WHERE table_name='trades'""")
+        before = {r[0] for r in cur.fetchall()}
+        assert "commission_estimated" not in before
+
+    database.init_db()
+    database.init_db()  # idempotent: a second run must not error or duplicate
+
+    with psycopg2.connect(db) as conn, conn.cursor() as cur:
+        cur.execute("""SELECT column_name FROM information_schema.columns
+                       WHERE table_name='trades'""")
+        after = {r[0] for r in cur.fetchall()}
+        cur.execute("SELECT order_id, fee, commission_estimated FROM trades ORDER BY id")
+        rows = cur.fetchall()
+
+    assert "commission_estimated" in after
+    assert before.issubset(after)          # additive: nothing dropped
+    assert len(rows) == 2                  # rows preserved
+    assert all(r[2] is None for r in rows) # existing rows untouched (NULL)
+    assert rows[0][1] == 0.0               # existing fee preserved
 
 
 # ── save_bot_state: dynamic universe means the symbol set isn't fixed ──

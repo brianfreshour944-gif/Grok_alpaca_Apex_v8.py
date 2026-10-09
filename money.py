@@ -89,6 +89,22 @@ def realized_pnl(avg_entry, exit_price, qty, fee=0.0) -> float:
     return float(gross - to_dec(fee))
 
 
+def estimated_fee(notional, fee_bps) -> float:
+    """
+    Estimate a taker fee in dollars from a fill notional and a per-side rate
+    in basis points: notional * fee_bps / 10000.
+
+    Used only when the exchange reports no commission (alpaca-py's Order has
+    no commission field), so recorded PnL reflects a realistic net rather than
+    a fee-free gross. This is an ESTIMATE, never an exchange-confirmed fee --
+    callers must flag it as such. Returns 0.0 for a non-positive notional.
+    """
+    n = to_dec(notional)
+    if n <= 0:
+        return 0.0
+    return float(n * to_dec(fee_bps) / Decimal(10000))
+
+
 def pnl_pct_fraction(avg_entry, current_price) -> float:
     """
     Calculate unrealized PnL as a FRACTION: (price - avg_entry) / avg_entry

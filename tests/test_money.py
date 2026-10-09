@@ -4,7 +4,7 @@ import pytest
 
 from money import (
     to_dec, mul, div, pct_change_x100, weighted_avg,
-    pnl_dollar, pnl_pct_fraction, qty, money, realized_pnl,
+    pnl_dollar, pnl_pct_fraction, qty, money, realized_pnl, estimated_fee,
 )
 
 
@@ -100,3 +100,29 @@ def test_to_dec_accepts_float_str_and_decimal():
     assert to_dec(1.5) == Decimal("1.5")
     assert to_dec("1.5") == Decimal("1.5")
     assert to_dec(Decimal("1.5")) == Decimal("1.5")
+
+
+# ── estimated_fee ──
+
+def test_estimated_fee_is_notional_times_bps_over_10000():
+    # 1000 notional * 25 bps / 10000 = 2.5
+    assert estimated_fee(1000.0, 25.0) == pytest.approx(2.5)
+
+
+def test_estimated_fee_scales_linearly_with_rate():
+    assert estimated_fee(1000.0, 15.0) == pytest.approx(1.5)
+    assert estimated_fee(1000.0, 40.0) == pytest.approx(4.0)
+
+
+def test_estimated_fee_zero_rate_is_zero():
+    assert estimated_fee(1000.0, 0.0) == 0.0
+
+
+def test_estimated_fee_non_positive_notional_is_zero():
+    assert estimated_fee(0.0, 25.0) == 0.0
+    assert estimated_fee(-100.0, 25.0) == 0.0
+
+
+def test_estimated_fee_uses_decimal_precision():
+    # 0.333 * 25 / 10000 = 0.0008325 exactly
+    assert estimated_fee(0.333, 25.0) == pytest.approx(0.0008325)

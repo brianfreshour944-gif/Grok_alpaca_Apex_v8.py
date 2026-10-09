@@ -98,6 +98,17 @@ MIN_HOLD_HOURS_BEFORE_SIGNAL = 0.5   # hold at least this long before signal-exi
 SLOW_BLEED_PCT               = float(os.getenv("SLOW_BLEED_PCT", "0.01"))
 SLOW_BLEED_MIN_HOURS         = float(os.getenv("SLOW_BLEED_MIN_HOURS", "1.0"))
 
+# Estimated taker fee, in basis points PER SIDE, applied when the exchange
+# reports no commission. alpaca-py's Order model has no 'commission' field
+# (verified against 0.33.0 and 0.44.0), so without this the recorded fee was
+# always 0.0 and realized PnL was silently gross of fees. 25 bps is Alpaca's
+# documented tier-1 crypto TAKER rate (maker = 15 bps); the bot's marketable
+# limits and its protective market sells are takers. These values are
+# ESTIMATES (commission_estimated=True flags them), not exchange-reported
+# fees -- they are only ever used to make recorded PnL honest, never for
+# order sizing or risk decisions.
+ESTIMATED_TAKER_FEE_BPS      = float(os.getenv("ESTIMATED_TAKER_FEE_BPS", "25"))
+
 # Trailing stop: distance from peak scales with realized volatility (ATR%)
 # instead of a fixed 1%. trailing_stop_pct = clamp(atr_pct/100 * multiplier,
 # min, max). At atr_pct=2.0 (the "normal" baseline in regime.py) this

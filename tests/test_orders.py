@@ -34,7 +34,7 @@ def test_sanitize_price_rounds_down_not_to_nearest():
 
 def test_place_order_buy_success(mock_trading_client):
     fake_order = MagicMock(id="order-1")
-    fake_filled = MagicMock(id="order-1", filled_avg_price="100.05", commission=None)
+    fake_filled = MagicMock(id="order-1", filled_qty="1.0", filled_avg_price="100.05", commission=None)
     mock_trading_client.submit_order.return_value = fake_order
     mock_trading_client.get_order_by_id.return_value = fake_filled
 
@@ -130,16 +130,19 @@ def test_sell_with_avg_entry_and_fill_records_realized_pnl(mock_trading_client, 
     fake_order = MagicMock(id="order-4")
     mock_trading_client.submit_order.return_value = fake_order
     mock_trading_client.get_order_by_id.return_value = MagicMock(
-        id="order-4", filled_avg_price="110.0", commission=None,
+        id="order-4", filled_qty="2.0", filled_avg_price="110.0", commission=None,
     )
 
     result = run_async(place_order("BTC/USD", OrderSide.SELL, qty=2.0, price=109.9, avg_entry=100.0))
 
     assert result is True
-    # NOTE: alpaca-py 0.33.0 Order model has no 'commission' field, so actual_fee
-    # stays 0.0 — realized PnL is gross, not net of fees.
-    assert recorded["realized_pnl"] == pytest.approx(20.0)   # (110-100)*2 - 0.0 fee
-    assert recorded["realized_pnl_pct"] == pytest.approx(0.10)  # 10% vs avg_entry
+    # alpaca-py's Order model has no 'commission' field, so an ESTIMATED taker
+    # fee is applied (default 25 bps/side) and realized PnL is now NET of it.
+    # Round-trip notional = (exit 110 + entry 100) * 2 = 420; fee = 420*0.0025 = 1.05.
+    assert recorded["fee"] == pytest.approx(1.05)
+    assert recorded["commission_estimated"] is True
+    assert recorded["realized_pnl"] == pytest.approx(20.0 - 1.05)   # (110-100)*2 - 1.05
+    assert recorded["realized_pnl_pct"] == pytest.approx(0.10)  # 10% vs avg_entry (gross pct, unchanged)
 
 
 def test_buy_never_records_realized_pnl(mock_trading_client, monkeypatch):
@@ -149,7 +152,7 @@ def test_buy_never_records_realized_pnl(mock_trading_client, monkeypatch):
 
     mock_trading_client.submit_order.return_value = MagicMock(id="order-5")
     mock_trading_client.get_order_by_id.return_value = MagicMock(
-        id="order-5", filled_avg_price="100.1", commission=None,
+        id="order-5", filled_qty="1.0", filled_avg_price="100.1", commission=None,
     )
 
     run_async(place_order("BTC/USD", OrderSide.BUY, qty=1.0, price=100.0, avg_entry=95.0))
@@ -169,7 +172,7 @@ def test_sell_without_avg_entry_does_not_record_realized_pnl(mock_trading_client
 
     mock_trading_client.submit_order.return_value = MagicMock(id="order-6")
     mock_trading_client.get_order_by_id.return_value = MagicMock(
-        id="order-6", filled_avg_price="110.0", commission=None,
+        id="order-6", filled_qty="2.0", filled_avg_price="110.0", commission=None,
     )
 
     run_async(place_order("BTC/USD", OrderSide.SELL, qty=2.0, price=109.9))  # no avg_entry
@@ -192,3 +195,185 @@ def test_sell_without_a_fill_price_does_not_record_realized_pnl(mock_trading_cli
 
     assert recorded["realized_pnl"] is None
     assert recorded["realized_pnl_pct"] is None
+
+
+# ── Protective exits: market sells ──
+# Stop loss / slow-bleed / max hold / kill switch submit market=True so the
+# position is actually out, rather than resting at price*0.999 where a fast
+# drop can leave the exit unfilled (and the loop's stale-order cancel then
+# re-chases it lower).
+
+def test_market_sell_submits_a_market_order_with_no_limit_price(mock_trading_client):
+    from alpaca.trading.requests import MarketOrderRequest
+
+    mock_trading_client.submit_order.return_value = MagicMock(id="mkt-1")
+    mock_trading_client.get_order_by_id.return_value = MagicMock(
+        id="mkt-1", filled_qty="0.01", filled_avg_price="99.0", commission=None,
+    )
+
+    run_async(place_order("BTC/USD", OrderSide.SELL, qty=0.01, price=100.0, market=True))
+
+    order_data = mock_trading_client.submit_order.call_args.kwargs["order_data"]
+    assert isinstance(order_data, MarketOrderRequest)
+    assert order_data.side == OrderSide.SELL
+    assert not hasattr(order_data, "limit_price") or order_data.limit_price is None
+
+
+def test_market_sell_uses_the_quantity_actually_held_not_quantity_bought(mock_trading_client):
+    """The protective exit path passes the qty read from the live position.
+    A partial/leftover position (e.g. 0.007 of a 0.01 buy) must be sold at
+    exactly that qty -- never the original buy size."""
+    mock_trading_client.submit_order.return_value = MagicMock(id="mkt-2")
+    mock_trading_client.get_order_by_id.return_value = MagicMock(
+        id="mkt-2", filled_qty="0.007", filled_avg_price="99.0", commission=None,
+    )
+
+    run_async(place_order("BTC/USD", OrderSide.SELL, qty=0.007, price=100.0, market=True))
+
+    order_data = mock_trading_client.submit_order.call_args.kwargs["order_data"]
+    assert order_data.qty == pytest.approx(0.007)
+
+
+def test_crypto_market_sell_time_in_force_is_gtc(mock_trading_client):
+    """Alpaca crypto accepts ONLY gtc and ioc -- day/fok/opg/cls are rejected.
+    The protective market sell must use gtc (it already does); this pins it so a
+    future edit can't switch the market order to 'day' and get it rejected."""
+    from alpaca.trading.enums import TimeInForce
+
+    mock_trading_client.submit_order.return_value = MagicMock(id="tif-1")
+    mock_trading_client.get_order_by_id.return_value = MagicMock(
+        id="tif-1", filled_qty="0.01", filled_avg_price="99.0", commission=None,
+    )
+
+    run_async(place_order("BTC/USD", OrderSide.SELL, qty=0.01, price=100.0, market=True))
+
+    order_data = mock_trading_client.submit_order.call_args.kwargs["order_data"]
+    assert order_data.time_in_force == TimeInForce.GTC
+
+
+def test_crypto_market_sell_tif_is_one_alpaca_accepts_for_crypto(mock_trading_client):
+    from alpaca.trading.enums import TimeInForce
+
+    # Per Alpaca docs: "For Crypto Trading, Alpaca only supports gtc, and ioc.
+    # OPG, fok, day, and CLS are not supported."
+    ALPACA_CRYPTO_TIFS = {TimeInForce.GTC, TimeInForce.IOC}
+
+    mock_trading_client.submit_order.return_value = MagicMock(id="tif-2")
+    mock_trading_client.get_order_by_id.return_value = MagicMock(
+        id="tif-2", filled_qty="0.01", filled_avg_price="99.0", commission=None,
+    )
+
+    run_async(place_order("BTC/USD", OrderSide.SELL, qty=0.01, price=100.0, market=True))
+
+    order_data = mock_trading_client.submit_order.call_args.kwargs["order_data"]
+    assert order_data.time_in_force in ALPACA_CRYPTO_TIFS
+    assert TimeInForce.DAY not in ALPACA_CRYPTO_TIFS
+
+
+def test_limit_sell_is_still_the_default(mock_trading_client):
+    from alpaca.trading.requests import LimitOrderRequest
+
+    mock_trading_client.submit_order.return_value = MagicMock(id="lim-1")
+    mock_trading_client.get_order_by_id.return_value = MagicMock(
+        id="lim-1", filled_qty="0.01", filled_avg_price="99.9", commission=None,
+    )
+
+    run_async(place_order("BTC/USD", OrderSide.SELL, qty=0.01, price=100.0))
+
+    order_data = mock_trading_client.submit_order.call_args.kwargs["order_data"]
+    assert isinstance(order_data, LimitOrderRequest)
+    assert order_data.limit_price == pytest.approx(99.9, abs=0.01)
+
+
+def test_buy_ignores_market_flag_and_stays_a_limit(mock_trading_client):
+    """Entries must remain limits even if market=True is passed -- the market
+    flag is for protective sells only."""
+    from alpaca.trading.requests import LimitOrderRequest
+
+    mock_trading_client.submit_order.return_value = MagicMock(id="buy-1")
+    mock_trading_client.get_order_by_id.return_value = MagicMock(
+        id="buy-1", filled_qty="0.01", filled_avg_price="100.1", commission=None,
+    )
+
+    run_async(place_order("BTC/USD", OrderSide.BUY, qty=0.01, price=100.0, market=True))
+
+    order_data = mock_trading_client.submit_order.call_args.kwargs["order_data"]
+    assert isinstance(order_data, LimitOrderRequest)
+    assert order_data.limit_price == pytest.approx(100.1, abs=0.01)
+
+
+# ── Estimated fee fallback ──
+
+def test_exchange_reported_commission_is_used_and_not_flagged_estimated(mock_trading_client, monkeypatch):
+    import orders
+    recorded = {}
+    monkeypatch.setattr(orders, "record_trade", lambda *a, **kw: recorded.update(kw))
+
+    mock_trading_client.submit_order.return_value = MagicMock(id="fee-1")
+    mock_trading_client.get_order_by_id.return_value = MagicMock(
+        id="fee-1", filled_qty="2.0", filled_avg_price="110.0", commission="1.23",
+    )
+
+    run_async(place_order("BTC/USD", OrderSide.SELL, qty=2.0, price=109.9, avg_entry=100.0))
+
+    assert recorded["fee"] == pytest.approx(1.23)
+    assert recorded["commission_estimated"] is False
+    assert recorded["realized_pnl"] == pytest.approx(20.0 - 1.23)
+
+
+def test_buy_never_records_an_estimated_fee(mock_trading_client, monkeypatch):
+    """Fee estimate applies to SELLs only, so SUM(fee) over the trades table is
+    the true round-trip cost and not a double count of the entry leg."""
+    import orders
+    recorded = {}
+    monkeypatch.setattr(orders, "record_trade", lambda *a, **kw: recorded.update(kw))
+
+    mock_trading_client.submit_order.return_value = MagicMock(id="fee-2")
+    mock_trading_client.get_order_by_id.return_value = MagicMock(
+        id="fee-2", filled_qty="1.0", filled_avg_price="100.1", commission=None,
+    )
+
+    run_async(place_order("BTC/USD", OrderSide.BUY, qty=1.0, price=100.0))
+
+    assert recorded["fee"] == 0.0
+    assert recorded["commission_estimated"] is False
+
+
+def test_partial_fill_fee_and_pnl_use_the_filled_qty(mock_trading_client, monkeypatch):
+    """A market sell can fill only part of the requested qty. Fee and realized
+    PnL must be computed on the FILLED qty (0.4), not the requested qty (1.0) --
+    otherwise the exit leg is over-charged and PnL is understated."""
+    import orders
+    recorded = {}
+    monkeypatch.setattr(orders, "record_trade", lambda *a, **kw: recorded.update(kw))
+
+    mock_trading_client.submit_order.return_value = MagicMock(id="part-1")
+    mock_trading_client.get_order_by_id.return_value = MagicMock(
+        id="part-1", filled_qty="0.4", filled_avg_price="110.0", commission=None,
+    )
+
+    run_async(place_order("BTC/USD", OrderSide.SELL, qty=1.0, price=109.9, avg_entry=100.0))
+
+    # Round-trip notional on 0.4: (110 + 100) * 0.4 = 84; fee = 84 * 25bps = 0.21
+    assert recorded["fee"] == pytest.approx(0.21)
+    assert recorded["commission_estimated"] is True
+    # Realized PnL on 0.4: (110 - 100) * 0.4 - 0.21
+    assert recorded["realized_pnl"] == pytest.approx(10 * 0.4 - 0.21)
+
+
+def test_sell_without_avg_entry_estimates_only_the_exit_leg(mock_trading_client, monkeypatch):
+    import orders
+    recorded = {}
+    monkeypatch.setattr(orders, "record_trade", lambda *a, **kw: recorded.update(kw))
+
+    mock_trading_client.submit_order.return_value = MagicMock(id="fee-3")
+    mock_trading_client.get_order_by_id.return_value = MagicMock(
+        id="fee-3", filled_qty="2.0", filled_avg_price="110.0", commission=None,
+    )
+
+    run_async(place_order("BTC/USD", OrderSide.SELL, qty=2.0, price=109.9))  # no avg_entry
+
+    # Exit-leg notional only: 110 * 2 * 25 bps = 0.55
+    assert recorded["fee"] == pytest.approx(0.55)
+    assert recorded["commission_estimated"] is True
+    assert recorded["realized_pnl"] is None
