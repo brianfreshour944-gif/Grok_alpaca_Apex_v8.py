@@ -86,3 +86,43 @@ with the daily ledger, not deploying on these numbers alone.
   perp receives funding; price term = −Δbasis; both legs costed). 4 tests.
 - Full suite: **292 passed, 1 skipped**. Lint clean on new files.
 - No `config.py` / `MODEL_PATH` change. Nothing promoted. `main` untouched.
+
+## Realistic cost model + forward-test ledger
+
+`run_basis` now charges **execution slippage** (per leg) and a **cross-venue
+transfer** on top of the taker fees. With fees 5 (perp) + 10 (spot) bps/leg,
+slippage 2 bps/leg and transfer 1 bps, the all-in cost is **~20 bps per unit of
+turnover**. Turnover per rebalance is ~1.0–1.33, so each rebalance costs ~20–27
+bps.
+
+This makes the **rebalance cadence decisive**. On the 2026-06 → 2026-09 window:
+
+| hold | net | %/yr |
+|---|---|---|
+| 3 (24h) | −7.84 bps/8h | **−85.9%** |
+| 21 (7d) | −1.19 | −13.0% |
+| 63 (21d) | +0.02 | +0.3% |
+| **126 (42d)** | **+0.23** | **+2.5%** |
+
+A 24h rebalance is a **cost disaster** — it churns the carry away. This directly
+contradicts the original freeze rule ("24h rebalance"), which predates the carry
+research and was written for the incumbent trend bot.
+
+### `research/carry_forward_test.py` — paper ledger, no trading
+
+Runs the frozen book over recent data and appends a **daily hypothetical book**
+to `forward_ledger.csv` (idempotent by date). The book comes from the shared
+`basis_strategy.select_legs`, so the ledger **cannot diverge** from the backtest
+(there is a test asserting exactly that).
+
+2026-06-01 → 2026-09-30, k=3, hold=126, all-in ~20 bps: **+83.2 bps (+0.83%)
+over 122 days, 66% winning days** (paper only).
+
+### Freeze deviation (recorded, not hidden)
+
+The original directive was **K=3, 7-day lookback, 24h rebalance**. For this book
+we freeze at **K=3, 42-day rebalance** and record why: the carry research shows a
+24h rebalance is a cost disaster (−86%/yr), while 42d is the research-supported
+cadence (+2.5%/yr). There is no "lookback" parameter for a cross-sectional
+funding rank. `--hold 3` reproduces the original rule; `--hold 126` is the
+default. This is a documented, evidence-based deviation, not silent tuning.

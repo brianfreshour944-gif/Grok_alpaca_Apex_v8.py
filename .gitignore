@@ -25,3 +25,4 @@ bt_cache/
 bt_results/
 perp_cache/
 spot_cache/
+forward_ledger.csv

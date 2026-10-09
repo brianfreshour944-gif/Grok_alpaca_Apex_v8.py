@@ -86,30 +86,55 @@ def _group_index(P):
     change = np.flatnonzero(ts[1:] != ts[:-1]) + 1
     bounds = np.concatenate([[0], change, [len(ts)]])
     sym2id = {s: i for i, s in enumerate(sorted(P["sym"].unique()))}
-    return bounds, P["sym"].map(sym2id).to_numpy(), len(sym2id)
+    return bounds, P["sym"].map(sym2id).to_numpy(), sym2id
 
 
-def run_basis(P: pd.DataFrame, k: int, hold: int = 1,
-              perp_cost: float = 5.0, spot_cost: float = 10.0) -> pd.DataFrame:
-    """Short top-k funding perps, each hedged long spot. Cost on both legs."""
-    bounds, ids, nsym = _group_index(P)
-    fund = P["funding_fwd"].to_numpy(float)
-    fxs = P["funding_xs"].to_numpy(float)           # most-expensive funding first
-    fp = P["fwd_perp"].to_numpy(float)
-    fs = P["fwd_spot"].to_numpy(float)
+def select_legs(P: pd.DataFrame, k: int):
+    """Yield (ts, short_syms) for the carry book: the k perps with the most
+    expensive funding. Each is SHORTED and hedged with a matching long spot;
+    there is no long-bottom-k leg (the book is delta-neutral per pair, not
+    long/short in the perp). Single source of truth for backtest and ledger."""
+    bounds, ids, sym2id = _group_index(P)
+    id2sym = {i: s for s, i in sym2id.items()}
+    fxs = P["funding_xs"].to_numpy(float)
     ts_arr = P["ts"].to_numpy()
-    cost = (perp_cost + spot_cost) / 1e4
-    prev = np.zeros(nsym)
-    idx, funding_r, price_r, net, turn_v = [], [], [], [], []
-    step, started = 0, False
     for a, b in itertools.pairwise(bounds):
         if b - a < 2 * k + 1:
             continue
+        order = np.argsort(-fxs[a:b])               # most-expensive funding first
+        loc = ids[a:b]
+        yield ts_arr[a], [id2sym[loc[i]] for i in order[:k]]
+
+
+def run_basis(P: pd.DataFrame, k: int, hold: int = 1,
+              perp_cost: float = 5.0, spot_cost: float = 10.0,
+              slippage_bps: float = 0.0, transfer_bps: float = 0.0) -> pd.DataFrame:
+    """Short top-k funding perps, each hedged long spot. Cost on both legs.
+
+    Beyond the taker fees (perp_cost, spot_cost), `slippage_bps` adds per-leg
+    execution slippage and `transfer_bps` adds a cross-venue collateral move;
+    both are charged on turnover like the fees.
+    """
+    bounds, ids, sym2id = _group_index(P)
+    nsym = len(sym2id)
+    fund = P["funding_fwd"].to_numpy(float)
+    fp = P["fwd_perp"].to_numpy(float)
+    fs = P["fwd_spot"].to_numpy(float)
+    ts_arr = P["ts"].to_numpy()
+    cost = (perp_cost + spot_cost + 2 * slippage_bps + transfer_bps) / 1e4
+    prev = np.zeros(nsym)
+    idx, funding_r, price_r, net, turn_v = [], [], [], [], []
+    step, started = 0, False
+    legs = select_legs(P, k)
+    for a, b in itertools.pairwise(bounds):
+        if b - a < 2 * k + 1:
+            continue
+        ts, short_s = next(legs)
         rebal = (not started) or (step % hold == 0)
         if rebal:
-            order = np.argsort(-fxs[a:b])
             w = np.zeros(nsym)
-            w[ids[a:b][order[:k]]] = 1.0 / k        # unit weight per held pair
+            for sy in short_s:                      # short the expensive funding
+                w[sym2id[sy]] += 1.0 / k
             turn = np.abs(w - prev).sum()
         else:
             w, turn = prev, 0.0
