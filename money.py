@@ -89,6 +89,22 @@ def realized_pnl(avg_entry, exit_price, qty, fee=0.0) -> float:
     return float(gross - to_dec(fee))
 
 
+def estimated_fee(notional, fee_bps) -> float:
+    """
+    Estimate a taker fee in dollars from a fill notional and a per-side rate
+    in basis points: notional * fee_bps / 10000.
+
+    Used only when the exchange reports no commission (alpaca-py's Order has
+    no commission field), so recorded PnL reflects a realistic net rather than
+    a fee-free gross. This is an ESTIMATE, never an exchange-confirmed fee --
+    callers must flag it as such. Returns 0.0 for a non-positive notional.
+    """
+    n = to_dec(notional)
+    if n <= 0:
+        return 0.0
+    return float(n * to_dec(fee_bps) / Decimal(10000))
+
+
 def pnl_pct_fraction(avg_entry, current_price) -> float:
     """
     Calculate unrealized PnL as a FRACTION: (price - avg_entry) / avg_entry
@@ -101,3 +117,24 @@ def pnl_pct_fraction(avg_entry, current_price) -> float:
     if old_d == 0:
         return 0.0
     return float((new_d - old_d) / old_d)
+
+
+def net_pnl_pct(avg_entry, exit_price, fee_bps, qty: float = 1.0) -> float:
+    """
+    Realized PnL as a FRACTION of ENTRY notional, NET of an ESTIMATED ROUND-TRIP
+    taker fee -- the same round-trip basis orders.py charges for the dollar PnL
+    (fee_bps on BOTH legs: entry notional + exit notional). By deriving the
+    fraction from the fee-netted dollar PnL, this holds exactly:
+
+        net_pnl_pct * (avg_entry * qty) == realized_pnl(avg_entry, exit, qty, fee)
+
+    Returns 0.0 for a non-positive entry notional (nothing to express the
+    fraction against), rather than dividing by zero.
+    """
+    entry_notional = to_dec(avg_entry) * to_dec(qty)
+    if entry_notional <= 0:
+        return 0.0
+    round_trip_notional = (to_dec(exit_price) + to_dec(avg_entry)) * to_dec(qty)
+    fee = estimated_fee(round_trip_notional, fee_bps)
+    net_dollar = realized_pnl(avg_entry, exit_price, qty, fee=fee)
+    return float(to_dec(net_dollar) / entry_notional)

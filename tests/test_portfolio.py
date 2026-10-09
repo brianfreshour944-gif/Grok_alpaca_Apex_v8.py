@@ -82,11 +82,15 @@ def _mock_position(symbol, market_value, qty, current_price, avg_entry_price):
     )
 
 
-def _mock_filled_order(order_id="oid", filled_avg_price=None):
+def _mock_filled_order(order_id="oid", filled_avg_price=None, filled_qty="0.1"):
     # commission=None: a bare MagicMock invents .commission and float() of it is
     # 1.0, which orders.py would book as a phantom $1 fee. Real trading-API
     # Orders have no commission field.
-    return MagicMock(id=order_id, filled_avg_price=filled_avg_price, commission=None)
+    # filled_qty is explicit for the same reason: a bare MagicMock's filled_qty
+    # floats to 1.0, so orders.py would book fee/PnL against qty=1.0 instead of
+    # the 0.1 actually sold here. Real fills report their true filled_qty.
+    return MagicMock(id=order_id, filled_qty=filled_qty,
+                     filled_avg_price=filled_avg_price, commission=None)
 
 
 def test_sell_largest_position_sells_biggest_by_market_value(mock_trading_client):
@@ -200,7 +204,11 @@ def test_sell_largest_position_records_realized_pnl(mock_trading_client):
     with um.patch.object(orders, "record_trade", lambda *a, **kw: recorded.update(kw)):
         run_async(sell_largest_position())
 
-    assert recorded["realized_pnl"] == pytest.approx((50000.0 - 48000.0) * 0.1)
+    # Realized PnL is now NET of an estimated taker fee (default 25 bps/side):
+    # round-trip notional = (50000 exit + 48000 entry) * 0.1 = 9800; fee = 24.5.
+    assert recorded["fee"] == pytest.approx(24.5)
+    assert recorded["commission_estimated"] is True
+    assert recorded["realized_pnl"] == pytest.approx((50000.0 - 48000.0) * 0.1 - 24.5)
 
 
 # ── swap_weakest_position ──

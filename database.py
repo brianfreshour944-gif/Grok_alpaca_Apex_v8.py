@@ -4,7 +4,8 @@
 
 import os
 import psycopg2
-from config import logger, BOT_NAME
+from config import logger, BOT_NAME, ESTIMATED_TAKER_FEE_BPS
+from money import estimated_fee
 
 
 def _init_bot_status_table(cur):
@@ -53,9 +54,24 @@ def _init_tables(cur):
             value REAL,
             fee REAL,
             fill_price REAL,
+            commission_estimated BOOLEAN,
             order_id TEXT,
             timestamp TIMESTAMP
         )
+    """)
+    # Migration: add commission_estimated column if it doesn't exist. TRUE means
+    # `fee` is an ESTIMATED taker fee (config.ESTIMATED_TAKER_FEE_BPS), not an
+    # exchange-reported commission -- the exchange never reports one.
+    cur.execute("""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'trades' AND column_name = 'commission_estimated'
+            ) THEN
+                ALTER TABLE trades ADD COLUMN commission_estimated BOOLEAN;
+            END IF;
+        END $$;
     """)
     # Migration: add fill_price column if it doesn't exist (for older DBs)
     cur.execute("""
@@ -218,13 +234,21 @@ def load_bot_state():
 
 
 def record_trade(bot_name, symbol, side, qty, price, order_id=None, fee=0.0, fill_price=None,
-                  realized_pnl=None, realized_pnl_pct=None):
+                  filled_qty=None, realized_pnl=None, realized_pnl_pct=None, commission_estimated=False):
     """
     Log a completed trade to the trades table.
 
     realized_pnl / realized_pnl_pct are only meaningful for SELL rows that
     close out a position against a known avg_entry (see orders.py); they are
     left NULL for BUY rows and for SELLs where no avg_entry was available.
+
+    commission_estimated flags `fee` as an ESTIMATED taker fee rather than an
+    exchange-reported commission (the exchange reports none).
+
+    filled_qty, when the exchange reported one, is the qty that ACTUALLY traded
+    and is stored (and used for `value`) in place of the requested `qty`: on a
+    partial fill the requested qty would overstate the position. Falls back to
+    `qty` when absent or non-positive (BUYs, and fills the exchange never sized).
     """
     db_url = os.getenv("DATABASE_URL")
     if not db_url:
@@ -233,21 +257,24 @@ def record_trade(bot_name, symbol, side, qty, price, order_id=None, fee=0.0, fil
     try:
         with psycopg2.connect(db_url) as conn:
             with conn.cursor() as cur:
-                value = (fill_price or price or 0.0) * qty
+                stored_qty = float(filled_qty) if filled_qty and float(filled_qty) > 0 else qty
+                value = (fill_price or price or 0.0) * stored_qty
                 actual_fill_price = fill_price if fill_price else (price or 0.0)
                 cur.execute("""
                     INSERT INTO trades
                         (bot_name, exchange, symbol, side, price, quantity,
-                         value, fee, fill_price, order_id, realized_pnl, realized_pnl_pct, timestamp)
-                    VALUES (%s, 'Alpaca', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
-                """, (bot_name, symbol, side, price or 0.0, qty, value,
-                      float(fee), float(actual_fill_price),
+                         value, fee, fill_price, commission_estimated, order_id,
+                         realized_pnl, realized_pnl_pct, timestamp)
+                    VALUES (%s, 'Alpaca', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                """, (bot_name, symbol, side, price or 0.0, stored_qty, value,
+                      float(fee), float(actual_fill_price), bool(commission_estimated),
                       str(order_id) if order_id else None,
                       float(realized_pnl) if realized_pnl is not None else None,
                       float(realized_pnl_pct) if realized_pnl_pct is not None else None))
             conn.commit()
             pnl_str = f" | Realized PnL: ${realized_pnl:.2f}" if realized_pnl is not None else ""
-            logger.info(f"Recorded trade: {side} {symbol} | Qty: {qty:.6f} | Price: {price} | Fill: {actual_fill_price} | Fee: ${float(fee):.4f}{pnl_str}")
+            est_str = " (est)" if commission_estimated else ""
+            logger.info(f"Recorded trade: {side} {symbol} | Qty: {stored_qty:.6f} | Price: {price} | Fill: {actual_fill_price} | Fee: ${float(fee):.4f}{est_str}{pnl_str}")
     except Exception as e:
         logger.error(f"DB Error: {e}")
 
@@ -277,9 +304,14 @@ def backfill_trade_if_missing(order) -> bool:
                             or getattr(order, "qty", 0) or 0)
                 fill_price = getattr(order, "filled_avg_price", None)
                 fill_price = float(fill_price) if fill_price else None
-                # NOTE: alpaca-py 0.33.0 Order model has no 'commission' field;
-                # fees are not available from order objects.
+                # alpaca-py's Order model has no 'commission' field, so the
+                # exchange-reported fee is normally absent; fall back to an
+                # ESTIMATED taker fee so the back-filled row is not fee-free.
                 fee = float(getattr(order, "commission", None) or 0.0)
+                commission_estimated = False
+                if fee == 0.0 and fill_price and qty:
+                    fee = estimated_fee(fill_price * qty, ESTIMATED_TAKER_FEE_BPS)
+                    commission_estimated = fee > 0
                 side = str(getattr(order, "side", "") or "")
                 symbol = str(getattr(order, "symbol", "") or "")
                 created = getattr(order, "created_at", None)
@@ -287,10 +319,10 @@ def backfill_trade_if_missing(order) -> bool:
                 cur.execute("""
                     INSERT INTO trades
                         (bot_name, exchange, symbol, side, price, quantity,
-                         value, fee, fill_price, order_id, timestamp)
-                    VALUES (%s, 'Alpaca', %s, %s, %s, %s, %s, %s, %s, %s, COALESCE(%s, NOW()))
+                         value, fee, fill_price, commission_estimated, order_id, timestamp)
+                    VALUES (%s, 'Alpaca', %s, %s, %s, %s, %s, %s, %s, %s, %s, COALESCE(%s, NOW()))
                 """, (BOT_NAME, symbol, side, fill_price or 0.0, qty, value,
-                      fee, fill_price, order_id, created))
+                      fee, fill_price, commission_estimated, order_id, created))
             conn.commit()
         logger.info(f"🔁 Back-filled missing trade row from exchange order {order_id} "
                     f"({side} {symbol} qty={qty})")

@@ -3,8 +3,18 @@
 import pytest
 
 from money import (
-    to_dec, mul, div, pct_change_x100, weighted_avg,
-    pnl_dollar, pnl_pct_fraction, qty, money, realized_pnl,
+    div,
+    estimated_fee,
+    money,
+    mul,
+    net_pnl_pct,
+    pct_change_x100,
+    pnl_dollar,
+    pnl_pct_fraction,
+    qty,
+    realized_pnl,
+    to_dec,
+    weighted_avg,
 )
 
 
@@ -100,3 +110,68 @@ def test_to_dec_accepts_float_str_and_decimal():
     assert to_dec(1.5) == Decimal("1.5")
     assert to_dec("1.5") == Decimal("1.5")
     assert to_dec(Decimal("1.5")) == Decimal("1.5")
+
+
+# ── estimated_fee ──
+
+def test_estimated_fee_is_notional_times_bps_over_10000():
+    # 1000 notional * 25 bps / 10000 = 2.5
+    assert estimated_fee(1000.0, 25.0) == pytest.approx(2.5)
+
+
+def test_estimated_fee_scales_linearly_with_rate():
+    assert estimated_fee(1000.0, 15.0) == pytest.approx(1.5)
+    assert estimated_fee(1000.0, 40.0) == pytest.approx(4.0)
+
+
+def test_estimated_fee_zero_rate_is_zero():
+    assert estimated_fee(1000.0, 0.0) == 0.0
+
+
+def test_estimated_fee_non_positive_notional_is_zero():
+    assert estimated_fee(0.0, 25.0) == 0.0
+    assert estimated_fee(-100.0, 25.0) == 0.0
+
+
+def test_estimated_fee_uses_decimal_precision():
+    # 0.333 * 25 / 10000 = 0.0008325 exactly
+    assert estimated_fee(0.333, 25.0) == pytest.approx(0.0008325)
+
+
+# ── net_pnl_pct: gross move minus the estimated round-trip fee ──
+
+def test_net_pnl_pct_subtracts_the_estimated_round_trip_fee():
+    # entry 100 -> exit 110 is a 10% gross move. Round-trip fee =
+    # (110 + 100) * 25bps = 0.525 on 1 unit; net dollar = 10 - 0.525 = 9.475;
+    # as a fraction of entry notional (100) that is 0.09475.
+    assert net_pnl_pct(100.0, 110.0, 25.0) == pytest.approx(0.09475)
+
+
+def test_net_pnl_pct_times_entry_notional_equals_the_net_dollar_pnl():
+    # The percentage must be exactly the fee-netted dollar PnL over entry
+    # notional, so the two views of a trade can never disagree.
+    from money import realized_pnl, estimated_fee
+    for entry, exit_, size in [(100.0, 110.0, 1.0), (100.0, 110.0, 2.5), (200.0, 180.0, 0.75)]:
+        pct = net_pnl_pct(entry, exit_, 25.0, size)
+        fee = estimated_fee((exit_ + entry) * size, 25.0)
+        assert pct * (entry * size) == pytest.approx(realized_pnl(entry, exit_, size, fee=fee))
+
+
+def test_net_pnl_pct_is_below_the_gross_fraction():
+    assert net_pnl_pct(100.0, 110.0, 25.0) < pnl_pct_fraction(100.0, 110.0)
+
+
+def test_net_pnl_pct_equals_gross_when_fee_is_zero():
+    assert net_pnl_pct(100.0, 110.0, 0.0) == pytest.approx(0.10)
+
+
+def test_net_pnl_pct_zero_entry_returns_gross_fraction_without_dividing():
+    # Non-positive entry: no notional to net against, so fall back to gross
+    # (0.0) rather than raising ZeroDivisionError.
+    assert net_pnl_pct(0.0, 110.0, 25.0) == 0.0
+
+
+def test_net_pnl_pct_can_turn_a_small_gain_negative():
+    # A 0.1% gross move is smaller than the 25 bps round-trip fee -> net is
+    # negative, which is the point: it stops reporting tiny wins as profitable.
+    assert net_pnl_pct(100.0, 100.1, 25.0) < 0
