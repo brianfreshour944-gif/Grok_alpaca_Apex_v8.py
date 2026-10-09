@@ -157,6 +157,43 @@ def test_backfill_estimates_fee_when_exchange_reports_none(mock_db):
     assert row["commission_estimated"] is True
 
 
+def test_backfill_inserts_a_row_with_an_estimated_fee(mock_db):
+    """End-to-end shape of the crash-recovery insert: it runs an INSERT INTO
+    trades carrying the exchange order's identity plus an estimated fee, and
+    returns True."""
+    from types import SimpleNamespace
+    order = SimpleNamespace(
+        id="bf-insert", filled_qty="3.0", filled_avg_price="200.0",
+        side="sell", symbol="ETHUSD", created_at=None,
+    )
+    mock_db.fetchone.return_value = None
+    assert database.backfill_trade_if_missing(order) is True
+
+    # An actual INSERT INTO trades was issued...
+    sql, _ = _last_insert_trades_call(mock_db)
+    assert "INSERT INTO trades" in sql
+    row = _backfill_insert_row(mock_db)
+    # ...with the order's fields and a non-zero ESTIMATED fee (200*3*25bps=1.5).
+    assert row["order_id"] == "bf-insert"
+    assert row["symbol"] == "ETHUSD"
+    assert row["side"] == "sell"
+    assert row["quantity"] == pytest.approx(3.0)
+    assert row["fee"] == pytest.approx(1.5)
+    assert row["commission_estimated"] is True
+
+
+def test_backfill_getattr_does_not_raise_for_a_missing_commission_field():
+    """Backfill relies on getattr(order, "commission", None) NOT raising when the
+    order model has no commission attribute (alpaca-py's Order does not). If it
+    raised, every backfill would abort before it could estimate a fee. Pin the
+    primitive so the estimate path is trusted to be reached."""
+    from types import SimpleNamespace
+    order = SimpleNamespace(id="x", filled_qty="1.0", filled_avg_price="100.0")
+    assert hasattr(order, "commission") is False
+    assert getattr(order, "commission", None) is None            # no raise
+    assert float(getattr(order, "commission", None) or 0.0) == 0.0
+
+
 def test_backfill_keeps_exchange_reported_commission_when_present(mock_db):
     from types import SimpleNamespace
     order = SimpleNamespace(

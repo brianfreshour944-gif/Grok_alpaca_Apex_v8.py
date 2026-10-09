@@ -119,17 +119,22 @@ def pnl_pct_fraction(avg_entry, current_price) -> float:
     return float((new_d - old_d) / old_d)
 
 
-def net_pnl_pct(avg_entry, exit_price, fee_bps) -> float:
+def net_pnl_pct(avg_entry, exit_price, fee_bps, qty: float = 1.0) -> float:
     """
-    Realized PnL as a FRACTION of entry notional, NET of an ESTIMATED round-trip
-    taker fee: (exit - entry)/entry - fee_bps/10000. The fee is charged on both
-    legs (entry + exit), and for a small move the entry and exit notionals are
-    close enough that a single per-leg bps deduction is the right order of
-    magnitude. Returns the GROSS fraction when avg_entry is non-positive (no
-    notional to net against), so callers never divide by zero.
+    Realized PnL as a FRACTION of ENTRY notional, NET of an ESTIMATED ROUND-TRIP
+    taker fee -- the same round-trip basis orders.py charges for the dollar PnL
+    (fee_bps on BOTH legs: entry notional + exit notional). By deriving the
+    fraction from the fee-netted dollar PnL, this holds exactly:
+
+        net_pnl_pct * (avg_entry * qty) == realized_pnl(avg_entry, exit, qty, fee)
+
+    Returns 0.0 for a non-positive entry notional (nothing to express the
+    fraction against), rather than dividing by zero.
     """
-    old_d = to_dec(avg_entry)
-    if old_d == 0:
-        return pnl_pct_fraction(avg_entry, exit_price)
-    gross = (to_dec(exit_price) - old_d) / old_d
-    return float(gross - to_dec(fee_bps) / Decimal(10000))
+    entry_notional = to_dec(avg_entry) * to_dec(qty)
+    if entry_notional <= 0:
+        return 0.0
+    round_trip_notional = (to_dec(exit_price) + to_dec(avg_entry)) * to_dec(qty)
+    fee = estimated_fee(round_trip_notional, fee_bps)
+    net_dollar = realized_pnl(avg_entry, exit_price, qty, fee=fee)
+    return float(to_dec(net_dollar) / entry_notional)

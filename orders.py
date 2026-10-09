@@ -229,9 +229,11 @@ async def place_order(symbol: str, side: OrderSide, qty: float, price: float = N
         realized_pnl_pct = None
         if side == OrderSide.SELL and avg_entry is not None and actual_fill_price is not None:
             realized_pnl_dollar = calc_realized_pnl(avg_entry, actual_fill_price, filled_qty_used, fee=actual_fee)
-            # NET of the estimated round-trip fee (entry + exit legs), so the
-            # percentage agrees with the fee-netted dollar PnL above.
-            realized_pnl_pct = calc_net_pnl_pct(avg_entry, actual_fill_price, ESTIMATED_TAKER_FEE_BPS)
+            # Same round-trip basis as the dollar PnL above, so
+            # realized_pnl_pct * (avg_entry * filled_qty_used) == realized_pnl_dollar.
+            realized_pnl_pct = calc_net_pnl_pct(
+                avg_entry, actual_fill_price, ESTIMATED_TAKER_FEE_BPS, filled_qty_used
+            )
 
         # Pass the qty that ACTUALLY filled so record_trade stores it (and values
         # it) instead of the qty requested: on a partial fill the requested qty

@@ -142,8 +142,9 @@ def test_sell_with_avg_entry_and_fill_records_realized_pnl(mock_trading_client, 
     assert recorded["fee"] == pytest.approx(1.05)
     assert recorded["commission_estimated"] is True
     assert recorded["realized_pnl"] == pytest.approx(20.0 - 1.05)   # (110-100)*2 - 1.05
-    # pct is now NET of the estimated round-trip fee too: 0.10 - 25bps = 0.0975
-    assert recorded["realized_pnl_pct"] == pytest.approx(0.10 - 0.0025)
+    # pct is NET of the same ROUND-TRIP fee: net dollar 18.95 / entry notional
+    # (100*2=200) = 0.09475.
+    assert recorded["realized_pnl_pct"] == pytest.approx(0.09475)
 
 
 def test_buy_never_records_realized_pnl(mock_trading_client, monkeypatch):
@@ -380,9 +381,8 @@ def test_full_fill_passes_the_filled_qty_to_record_trade(mock_trading_client, mo
 
 
 def test_realized_pnl_pct_is_net_of_estimated_fee(mock_trading_client, monkeypatch):
-    """The percentage must agree with the fee-netted dollar PnL: gross move back
-    out the estimated round-trip fee (25 bps here), not the raw price move."""
-    import config
+    """The percentage must agree with the fee-netted dollar PnL: it is that
+    dollar figure over entry notional, so pct * entry_notional == dollar."""
     import orders
     recorded = {}
     monkeypatch.setattr(orders, "record_trade", lambda *a, **kw: recorded.update(kw))
@@ -393,11 +393,13 @@ def test_realized_pnl_pct_is_net_of_estimated_fee(mock_trading_client, monkeypat
     )
     run_async(place_order("BTC/USD", OrderSide.SELL, qty=1.0, price=109.9, avg_entry=100.0))
 
-    gross = (110.0 - 100.0) / 100.0                       # 0.10
-    expected = gross - config.ESTIMATED_TAKER_FEE_BPS / 10000  # - 0.0025
-    assert recorded["realized_pnl_pct"] == pytest.approx(expected)
-    # and it is strictly less than the gross percentage
-    assert recorded["realized_pnl_pct"] < gross
+    # Gross +0.10; round-trip fee = (110+100)*1*25bps = 0.525 -> net dollar 9.475
+    # -> 0.09475 of entry notional (100).
+    assert recorded["realized_pnl_pct"] == pytest.approx(0.09475)
+    assert recorded["realized_pnl_pct"] < 0.10          # below the gross move
+    # The two views of the trade must reconcile exactly.
+    entry_notional = 100.0 * 1.0
+    assert recorded["realized_pnl_pct"] * entry_notional == pytest.approx(recorded["realized_pnl"])
 
 
 def test_sell_without_avg_entry_estimates_only_the_exit_leg(mock_trading_client, monkeypatch):

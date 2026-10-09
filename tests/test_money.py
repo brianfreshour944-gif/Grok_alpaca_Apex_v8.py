@@ -3,8 +3,18 @@
 import pytest
 
 from money import (
-    to_dec, mul, div, pct_change_x100, weighted_avg,
-    pnl_dollar, pnl_pct_fraction, net_pnl_pct, qty, money, realized_pnl, estimated_fee,
+    div,
+    estimated_fee,
+    money,
+    mul,
+    net_pnl_pct,
+    pct_change_x100,
+    pnl_dollar,
+    pnl_pct_fraction,
+    qty,
+    realized_pnl,
+    to_dec,
+    weighted_avg,
 )
 
 
@@ -130,9 +140,21 @@ def test_estimated_fee_uses_decimal_precision():
 
 # ── net_pnl_pct: gross move minus the estimated round-trip fee ──
 
-def test_net_pnl_pct_subtracts_the_estimated_fee():
-    # 10% gross move, 25 bps round-trip estimate -> 0.0975
-    assert net_pnl_pct(100.0, 110.0, 25.0) == pytest.approx(0.10 - 0.0025)
+def test_net_pnl_pct_subtracts_the_estimated_round_trip_fee():
+    # entry 100 -> exit 110 is a 10% gross move. Round-trip fee =
+    # (110 + 100) * 25bps = 0.525 on 1 unit; net dollar = 10 - 0.525 = 9.475;
+    # as a fraction of entry notional (100) that is 0.09475.
+    assert net_pnl_pct(100.0, 110.0, 25.0) == pytest.approx(0.09475)
+
+
+def test_net_pnl_pct_times_entry_notional_equals_the_net_dollar_pnl():
+    # The percentage must be exactly the fee-netted dollar PnL over entry
+    # notional, so the two views of a trade can never disagree.
+    from money import realized_pnl, estimated_fee
+    for entry, exit_, size in [(100.0, 110.0, 1.0), (100.0, 110.0, 2.5), (200.0, 180.0, 0.75)]:
+        pct = net_pnl_pct(entry, exit_, 25.0, size)
+        fee = estimated_fee((exit_ + entry) * size, 25.0)
+        assert pct * (entry * size) == pytest.approx(realized_pnl(entry, exit_, size, fee=fee))
 
 
 def test_net_pnl_pct_is_below_the_gross_fraction():
@@ -150,6 +172,6 @@ def test_net_pnl_pct_zero_entry_returns_gross_fraction_without_dividing():
 
 
 def test_net_pnl_pct_can_turn_a_small_gain_negative():
-    # A 0.1% gross move is smaller than the 25 bps fee -> net is negative, which
-    # is the point: it stops reporting tiny wins as profitable.
+    # A 0.1% gross move is smaller than the 25 bps round-trip fee -> net is
+    # negative, which is the point: it stops reporting tiny wins as profitable.
     assert net_pnl_pct(100.0, 100.1, 25.0) < 0
