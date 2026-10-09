@@ -23,3 +23,4 @@ __pycache__/
 # Backtest output (backtest_apex.py)
 bt_cache/
 bt_results/
+perp_cache/
