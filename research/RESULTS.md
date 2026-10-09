@@ -204,3 +204,92 @@ project, not a tweak to this bot.
 - `research/funding_probe.py` -- fetch + funding features + the three tests above.
 - Funding cache lives in `bt_cache/funding/` (gitignored).
 - Not promoted; no `config.py` change; nothing pushed.
+
+---
+
+# The "different strategy" — market-neutral funding carry (2026-10-09)
+
+Branch `research/market-neutral-funding`. This section answers the closing line
+of the previous investigation ("a genuinely winning strategy would need to be a
+different one: multi-day, market-neutral, funding/positioning-driven"). I built
+that strategy and tested it out-of-sample. **It is net-positive at realistic
+costs, with a timing-alpha null p-value of 0.00 — the first configuration in
+this repo that clears costs — but its P&L is regime-concentrated, so treat the
+headline CAGR as an upper bound, not a promise.**
+
+## What changed from the failed funding probe
+
+The earlier probe (`funding_probe.py`) ranked by a *model* that had already been
+shown to have no OOS edge, and it omitted two things that turn out to matter:
+
+1. **The funding cashflow itself was missing.** A perp long-short earns the
+   funding payments (when funding > 0, short legs collect, long legs pay). The
+   probe only scored the price leg, so a carry strategy looked like pure price
+   betting. Adding the cashflow is worth ~+3.5 bps/period at 24h.
+2. **The right horizon for a *model-free* carry signal is 1 day, not 7.**
+   Funding predicts multi-day direction poorly (as the probe found), but the
+   cross-sectional funding *level* earns a large, robust price reversal over the
+   next 24h — that reversal, not the slow prediction, is where the edge is.
+
+## The strategy (`funding_carry.py`, deployable)
+
+- Score: `-cross_sectional_z(Σ 168h funding)` — long the lowest-funding, short
+  the highest-funding names. Turnover is tiny (~0.16 legs/period) because
+  funding ranks are persistent, so costs are ~1 bps at Binance fees.
+- Book: equal-weight, dollar-neutral long-top-3 / short-bottom-3, rebalanced
+  every 24h. 15-symbol liquid Binance USDT-M perp universe.
+- Costs modelled at the *venue that has the data*: Binance USDⓈ-M taker 5 bps /
+  maker 2 bps per fill. Alpaca's tier-1 25 bps is shown as a reference column
+  and is **not** the relevant fee here.
+
+## Evidence (15 symbols, 21 months, 2025-01 → 2026-09, all out-of-sample-ish)
+
+| mode | H | n | gross bps | price | funding | net taker(5) | t | net maker(2) | net alpaca(25) | p_null |
+|---|---|---|---|---|---|---|---|---|---|---|
+| **carry** | 24h | 630 | +14.9 | +11.4 | +3.5 | **+10.2** | +1.14 | +13.0 | -8.6 | **0.00** |
+| carry | 72h | 210 | +26.1 | +16.3 | +9.8 | +16.9 | +0.67 | +22.4 | -19.8 | 0.05 |
+| carry | 168h | 90 | +86.2 | +65.7 | +20.5 | +73.4 | +1.38 | +81.1 | +22.1 | 0.02 |
+| ml (model) | 24h | 369 | +2.8 | — | — | -15.0 | -1.58 | -4.3 | -86.4 | 0.43 |
+
+- **The ML gate is dead weight**: every model mode is negative or ~0 at every
+  horizon. The edge is the funding carry, not a model.
+- **Venue is decisive**: at Binance fees the 24h carry earns ~+10 bps/period
+  (≈ +42% simple annualised at full 2× gross); at Alpaca's 25 bps it is -8.6.
+  The same signal that fails on Alpaca works on a perp venue because a
+  rebalance costs ~1 bps instead of ~8 bps.
+- **Timing-alpha null p=0.00** at 24h across 630 non-overlapping observations —
+  the P&L is not market beta (the book is dollar-neutral by construction).
+
+## Robustness — the honest caveats
+
+- **Sub-period concentration.** At 24h the three 7-month chunks are +8.3, +39.2,
+  -2.9 gross bps. Essentially all of the P&L is the 2025-08 → 2026-03 phase
+  (a high-funding, high-dispersion bull). The other two thirds are ~flat.
+- **K sensitivity.** K=2 (+15.3) and K=3 (+14.9) work; K=4 (+4.7) and K=5 (-0.1)
+  do not. Wider books dilute into names where the carry/reversal is absent.
+- **Gate experiments failed.** Conditioning on funding *dispersion* or a BTC
+  uptrend **destroys** the edge (gross → ~0): the price alpha lives in
+  low-dispersion, range-bound regimes, which is the opposite of intuition.
+- **Cost model.** No slippage/funding-interval drift is modelled; fills assumed
+  at the rebalance close. Real execution will be worse by a few bps.
+
+## Verdict
+
+This is the first thing in the repo that clears costs out-of-sample, and it does
+so for a structural reason (a real dollar-neutral carry + short-horizon reversal
+edge, tiny turnover, and a venue with 2–5 bps fills). It is **not** a
+promise of a smooth 42%/yr: the edge is regime-dependent and was concentrated in
+one market phase. Recommended next step is paper-trading the 24h/K=3 book with
+maker orders on a perp venue, tracked against the sub-period profile above.
+
+## Files
+
+- `funding_carry.py` — deployable strategy (pure functions: `funding_carry_score`,
+  `select_book`, `target_weights`, `plan_rebalance`, `book_metrics`).
+- `research/market_neutral_funding.py` — harness: fetch, features, walk-forward,
+  market-neutral book, cost tiers, circular-shift null, robustness, and a
+  `verify_deployable()` parity check against `funding_carry.py`.
+- `tests/test_funding_carry.py` — 11 unit tests.
+- Data cached under `bt_cache/research/` (gitignored).
+- No `config.py` change; the incumbent bot is untouched.
+
