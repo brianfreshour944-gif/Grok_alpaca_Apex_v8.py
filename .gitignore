@@ -24,3 +24,4 @@ __pycache__/
 bt_cache/
 bt_results/
 perp_cache/
+spot_cache/

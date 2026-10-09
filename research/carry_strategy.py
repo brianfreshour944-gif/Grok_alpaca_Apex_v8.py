@@ -42,8 +42,8 @@ def build_panel(cache: str, rebal_hours: int = 8) -> pd.DataFrame:
         ff = f.reindex(df.index, method="ffill")
         g = pd.DataFrame({"sym": sym, "close": c, "fwd": r, "funding": ff})
         # funding actually earned by a position opened at this bar: the NEXT
-        # stamp (a position set at ts is credited funding at ts+interval).
-        g["funding_fwd"] = ff.shift(-rebal_hours // 8 if rebal_hours >= 8 else -1)
+        # stamp (funding settles every 8h, so skip a full interval).
+        g["funding_fwd"] = ff.shift(-rebal_hours)
         rows.append(g)
     P = pd.concat(rows).reset_index().rename(columns={"open_time": "ts"})
     # keep only rows on rebalance boundaries
