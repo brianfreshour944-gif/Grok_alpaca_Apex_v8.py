@@ -30,12 +30,16 @@ import numpy as np
 import pandas as pd
 
 # ── Defaults (chosen by out-of-sample walk-forward, not in-sample tuning) ──────
-LOOKBACK_HOURS = 168     # 7 days of funding history
-HOLD_HOURS = 24          # rebalance cadence
-TOP_K = 3                # names per side
+# FROZEN RULE (2026-10-09): K=3, 7-day funding lookback, 24h rebalance. Do NOT
+# tune these further -- they are fixed for forward/backward validation. Changing
+# any of them invalidates the out-of-sample tests (see research/RESULTS.md).
+LOOKBACK_HOURS = 168     # 7 days of funding history  [FROZEN]
+HOLD_HOURS = 24          # rebalance cadence           [FROZEN]
+TOP_K = 3                # names per side              [FROZEN]
 FUNDING_INTERVAL_HOURS = 8
 
-# Liquid Binance USDT-M perps with long funding history (>= K*2 + slack).
+# Frozen universe: liquid Binance USDT-M perps with long funding history.
+# Do NOT add/remove names -- a changing universe is another form of tuning.
 DEFAULT_UNIVERSE = [
     "BTC", "ETH", "SOL", "BNB", "XRP", "ADA", "DOGE", "AVAX",
     "LINK", "DOT", "LTC", "BCH", "TRX", "ATOM", "UNI",

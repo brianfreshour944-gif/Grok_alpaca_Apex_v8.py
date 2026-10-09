@@ -289,7 +289,125 @@ maker orders on a perp venue, tracked against the sub-period profile above.
 - `research/market_neutral_funding.py` — harness: fetch, features, walk-forward,
   market-neutral book, cost tiers, circular-shift null, robustness, and a
   `verify_deployable()` parity check against `funding_carry.py`.
-- `tests/test_funding_carry.py` — 11 unit tests.
-- Data cached under `bt_cache/research/` (gitignored).
+- `research/validate_frozen.py` — frozen-rule falsification harness: backward
+  (2022-2024), forward (unseen tail), per-day ledger, venue cost table.
+- `tests/test_funding_carry.py` — 14 unit tests (incl. frozen-constant and
+  panel-alignment regression guards).
+- Data cached under `bt_cache/research/` (gitignored); the forward ledger is
+  `bt_cache/research/forward_ledger.csv`.
 - No `config.py` change; the incumbent bot is untouched.
 
+
+---
+
+# Frozen-rule falsification: backward (2022-2024) + forward (unseen) tests
+
+The rule is **frozen**: K=3, 168h (7-day) funding lookback, 24h rebalance,
+15-symbol universe. Nothing below re-tunes it. `research/validate_frozen.py`
+re-runs the frozen rule on data the tuning never saw, in both directions. The
+goal is to separate a durable edge from a 2025-26 regime.
+
+## Backward test — 2022-01 .. 2024-12 (never used for tuning)
+
+n=1085 non-overlapping 24h rebalances, gross +14.0 bps/period.
+
+| year | n | gross bps | net taker(5) | t | net maker(2) |
+|---|---|---|---|---|---|
+| 2022 (bear) | 355 | **−6.5** | −10.2 | −0.75 | −8.0 |
+| 2023 | 365 | +17.5 | +14.0 | +1.35 | +16.1 |
+| 2024 | 365 | +30.4 | +26.5 | +2.07 | +28.9 |
+| **2022-24** | **1085** | **+14.0** | **+10.3** | **+1.44** | **+12.5** |
+
+Quarterly, 2022 splits cleanly at the **Terra/LUNA (Q2) and FTX (Q4) collapses**:
+
+| quarter | gross bps | | quarter | gross bps |
+|---|---|---|---|---|
+| 2022Q1 | +44.3 | | 2023Q3 | +4.6 |
+| 2022Q2 | −16.1 | | 2023Q4 | +4.6 |
+| 2022Q3 | −22.0 | | 2024Q1 | +26.1 |
+| 2022Q4 | −30.6 | | 2024Q2 | +31.0 |
+| 2023Q1 | +23.4 | | 2024Q3 | +34.5 |
+| 2023Q2 | +37.6 | | 2024Q4 | +24.8 |
+
+**Reading:** the edge is present in 2023 and 2024 — years the tuning never saw —
+so it is not purely a 2025-26 artifact. But it is **not regime-independent**: it
+loses in the 2022 bear, and the loss is concentrated in crisis quarters (LUNA,
+FTX). Consistent with the earlier sub-period finding: the price-reversal leg
+needs a functioning, high-funding market, and 2022 was deleveraging/negative-
+funding. Whole-history 2022-2026: **net +10.0 bps taker (t=+1.81), +12.5 maker.**
+
+## Forward test — unseen data
+
+The tuning window was 2025-01 .. 2026-09. Binance Vision **monthly** archives end
+at 2026-09 and **daily** archives end at 2026-10-08, so the only genuinely-unseen
+days available today are **2026-10-01 .. 2026-10-07** (the 10-08 day is
+incomplete). That is far short of the 60 days requested; this is a data-window
+limit, not a choice.
+
+| rebalance | price bps | funding bps | gross bps | turnover | net taker bps |
+|---|---|---|---|---|---|
+| 2026-10-01 | +54.4 | +2.1 | +56.6 | 0.17 | +51.6 |
+| 2026-10-02 | −7.0 | +1.7 | −5.3 | 0.33 | −15.3 |
+| 2026-10-03 | +161.4 | +1.7 | +163.0 | 0.17 | +158.0 |
+| 2026-10-04 | −240.7 | +2.6 | −238.1 | 0.00 | −238.1 |
+| 2026-10-05 | −165.8 | +1.5 | −164.3 | 0.50 | −179.3 |
+| 2026-10-06 | +234.1 | +1.4 | +235.5 | 0.17 | +230.5 |
+| 2026-10-07 | +200.3 | +0.2 | +200.4 | 0.00 | +200.4 |
+
+**7 unseen rebalances | cumulative +207.9 bps net | mean +29.7 bps/period.**
+
+Reading: positive on net, and the **funding cashflow leg is positive every day**
+(the structural carry is intact). But 7 one-day observations is **statistically
+meaningless** — a single ±200 bps day dominates. This neither confirms nor
+refutes the edge; it is one data point about direction.
+
+## Where it could actually be traded
+
+Venue-specific net for the frozen rule on the full panel (n=1723, turnover 0.14,
+6 legs/period). Fees are VIP-0 / regular tiers published 2026:
+
+| venue | maker | taker | net bps maker | ann% maker | net bps taker | ann% taker |
+|---|---|---|---|---|---|---|
+| Hyperliquid | 1.5 | 4.5 | +12.9 | +47.0% | +10.5 | +38.1% |
+| Binance USDⓈ-M | 2.0 | 5.0 | +12.5 | +45.5% | +10.0 | +36.7% |
+| OKX / dYdX / Kraken Futures | 2.0 | 5.0 | +12.5 | +45.5% | +10.0 | +36.7% |
+| Bybit | 2.0 | 5.5 | +12.5 | +45.5% | +9.6 | +35.2% |
+| Bitget / KuCoin | 2.0 | 6.0 | +12.5 | +45.5% | +9.2 | +33.7% |
+| Alpaca (spot, incumbent) | 15.0 | 25.0 | +1.9 | +7.1% | **−6.2** | **−22.5%** |
+
+1. **The incumbent venue cannot host this.** Alpaca is a US spot broker; the
+   frozen rule is dollar-neutral on **perps** (no borrow), and Alpaca's 25 bps
+   taker makes even the price leg net-negative. The strategy is perp-native.
+2. **Any 2/5 bps perp venue works** — Binance, OKX, dYdX v4, Kraken Futures all
+   land at ~+10 taker / +12.5 maker bps. Hyperliquid is marginally best
+   (1.5/4.5) and needs no KYC, but carries smart-contract/bridge risk and thinner
+   depth in the long tail of the 15 names.
+3. **Maker execution is the real lever.** The rule rebalances only every 24h with
+   ~0.14 turnover, so posting passive maker orders on both legs is realistic;
+   that captures the +12.5 bps tier and adds ~+2.5 bps vs taking.
+4. **US-resident reality (2026):** Binance global is not available to US persons.
+   CFTC-regulated US perps now exist — **Kraken Derivatives US (Bitnomial)** and
+   **Coinbase Financial Markets** — but they list a limited, blue-chip set
+   (BTC/ETH/SOL/XRP/ADA/LINK/DOGE/LTC/AVAX) with thinner depth, and Bitnomial
+   lists a subset. A US account would have to trade a **reduced universe**, which
+   changes the cross-section the rule was frozen on. Getting the full 15-name
+   book means a non-US venue (OKX, dYdX, Hyperliquid).
+5. **Funding-interval mismatch:** the frozen rule ranks on 8h funding (Binance
+   USDT-M). Hyperliquid settles **hourly**; the carry magnitude differs. A live
+   port should re-derive the score from the host venue's own funding.
+
+## Honest verdict
+
+**Both tests come back with a positive but not clean signal.** The backward test
+is genuinely encouraging — 3 years never used for tuning, net-positive at
+realistic perp costs, and the loss quarters map onto known deleveraging events,
+not random decay. The forward test is net-positive but only 7 days, so it is
+inconclusive by construction. The specific "only works in 2025-26" hypothesis is
+**refuted** (2023-24 are strong), but the weaker, real concern — "it has
+bear-market drawdowns" — is **confirmed** (2022 was −10 net taker bps/period).
+
+Because the 60-day forward window does not yet exist, the disciplined conclusion
+is: **paper-trade, do not deploy capital.** Keep appending to the daily ledger
+(`bt_cache/research/forward_ledger.csv`) as new days land; the decision point is
+≥60 unseen rebalances, evaluated against the drawdown profile above, not the
+cumulative number. Nothing here promotes the strategy; `config.py` is untouched.

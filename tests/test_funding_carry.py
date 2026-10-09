@@ -109,3 +109,38 @@ def test_book_metrics_gross_matches_held_returns():
     m = fc.book_metrics(prices, weights, H=24)
     # 0.5 weight on a +10% move -> +5% -> +500 bps gross for the period
     assert m["gross_bps"] == pytest.approx(500.0, rel=1e-6)
+
+
+# ── FROZEN-RULE + validation-harness guards (no network) ─────────────────────
+
+def test_frozen_rule_constants_are_locked():
+    # The rule is frozen: K=3, 7-day lookback, 24h rebalance. If these change,
+    # every out-of-sample validation in research/RESULTS.md is invalidated.
+    assert fc.TOP_K == 3
+    assert fc.LOOKBACK_HOURS == 168
+    assert fc.HOLD_HOURS == 24
+
+
+def test_daily_panel_alignment_preserves_all_symbols():
+    # Regression: concatenating per-symbol Series in a loop stack-duplicates the
+    # shared timestamp index instead of aligning columns; the one-shot DataFrame
+    # concat must keep every symbol's data.
+    idx = pd.date_range("2026-10-01", periods=24, freq="1h")
+    base = pd.DataFrame({s: 1.0 for s in "abcdefg"},
+                        index=pd.date_range("2026-09-01", periods=48, freq="1h"))
+    daily = {s: pd.Series(2.0, index=idx) for s in "abcdefg"}
+    out = pd.concat([base, pd.DataFrame(daily).sort_index()]).sort_index()
+    assert out.shape[1] == 7
+    assert out.loc["2026-10-01":].notna().sum().sum() == 7 * 24
+
+
+def test_daily_ledger_reports_per_rebalance_rows():
+    import research.validate_frozen as V
+    idx = pd.date_range("2026-01-01", periods=600, freq="1h")
+    syms = list("abcdefgh")
+    fund = pd.DataFrame({s: (i + 1) * 1e-5 for i, s in enumerate(syms)}, index=idx)
+    close = pd.DataFrame(100.0, index=idx, columns=syms)
+    led = V.daily_ledger(close, fund, [d.strftime("%Y-%m-%d") for d in idx[300:320]])
+    assert len(led) >= 5
+    assert {"date", "price_bps", "funding_bps", "gross_bps", "net_bps_taker"} <= set(led.columns)
+    assert (led["n_long"] == 3).all() and (led["n_short"] == 3).all()
