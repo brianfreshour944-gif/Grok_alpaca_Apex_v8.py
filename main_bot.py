@@ -390,6 +390,50 @@ async def retry_partial_exit(symbol: str, price: float, avg_entry: float,
     return remaining <= 0 or remaining_value < MIN_ORDER_USD
 
 
+class DailyLossTracker:
+    """Tracks a daily session baseline so the DAILY_LOSS_LIMIT kill-switch is
+    actually per-day.
+
+    Without a reset the baseline (``start_equity``) is pinned at the very first
+    equity reading of the process, so the "daily" limit silently accumulates
+    losses over the whole run and the bot halts permanently the first time it
+    is down DAILY_LOSS_LIMIT% from process start -- even if that took weeks.
+    Resetting the baseline at each UTC day boundary restores the intended
+    semantics: block/flatten for the rest of *today*, then trade again
+    tomorrow from a fresh baseline.
+    """
+
+    def __init__(self, now: float | None = None):
+        self.day: str | None = None
+        self.start_equity: float | None = None
+        self.roll(now)
+
+    def roll(self, now: float | None = None) -> bool:
+        """Advance to the current UTC day; returns True if the day changed
+        (i.e. the session baseline was reset)."""
+        if now is None:
+            now = time.time()
+        day = time.strftime("%Y-%m-%d", time.gmtime(now))
+        if day != self.day:
+            self.day = day
+            self.start_equity = None
+            return True
+        return False
+
+    def equity(self, now: float | None = None) -> float | None:
+        """Session-start equity for the current UTC day (None until set)."""
+        self.roll(now)
+        return self.start_equity
+
+    def update(self, equity: float, now: float | None = None) -> float | None:
+        """Record the latest equity, setting the session baseline on the first
+        valid reading of the day. Returns the session-start equity."""
+        self.roll(now)
+        if self.start_equity is None and equity > 0:
+            self.start_equity = equity
+        return self.start_equity
+
+
 # ── Main trading loop ───────────────────────────────────────────────
 async def run_trading_mode():
     state = TradingBotState()
@@ -504,6 +548,11 @@ async def run_trading_mode():
     state.active_universe    = []
     state.last_universe_scan = 0.0
 
+    # Per-UTC-day loss baseline (see DailyLossTracker). Distinct from
+    # state.start_equity, which stays the all-time process-start equity used by
+    # the MAX_DRAWDOWN_STOP hard stop.
+    daily_loss = DailyLossTracker()
+
     while True:
         try:
             write_heartbeat()
@@ -522,6 +571,9 @@ async def run_trading_mode():
             # don't yet have a valid (>0) baseline equity to compare against.
             if state.start_equity is None and equity > 0:
                 state.start_equity = equity
+
+            # Per-day baseline for the DAILY_LOSS_LIMIT kill-switch.
+            daily_loss.update(equity)
 
             await asyncio.to_thread(report_equity, BOT_NAME, equity)
 
@@ -562,8 +614,9 @@ async def run_trading_mode():
             # (c) break the trading loop entirely. This is a hard halt,
             # not advisory — the bot will not resume until manually restarted.
             session_loss_pct = None
-            if state.start_equity:
-                session_loss_pct = (equity - state.start_equity) / state.start_equity * 100
+            day_start = daily_loss.equity()
+            if day_start:
+                session_loss_pct = (equity - day_start) / day_start * 100
                 if session_loss_pct <= DAILY_LOSS_LIMIT:
                     logger.critical(
                         f"🚨 DAILY LOSS LIMIT HIT: Session loss {session_loss_pct:.2f}% "
