@@ -88,6 +88,31 @@ change is **operational**: the default `live` kill-switch is a permanent -3%
 stop-out (`start_equity` set once), which is why the shipped configuration just
 goes quiet -- worth fixing independently of any edge question.
 
+## The decisive measurement: the model has no out-of-sample signal
+
+Spearman IC of the raw model output vs forward 6-bar return, split at the model
+file's last commit (2026-07-19):
+
+| period | mean IC across 10 symbols | per-symbol |
+|---|---|---|
+| 2025-04 -> 2026-07 (in-sample) | **+0.0548** | all 10 positive (+0.031 .. +0.085) |
+| 2026-07 -> 2026-10 (out-of-sample) | **-0.0008** | 5 of 10 negative |
+
+The model's information content is **entirely in-sample**. Out of sample it is
+statistically indistinguishable from zero. No threshold, hold time, stop, or
+exit rule can extract a persistent edge from a signal that has none -- which is
+exactly what the OOS results above show. Any "winning" configuration is fitting
+the in-sample era.
+
+**Therefore the honest answer to "change the code until we get a winning
+percentage" is: this cannot be achieved by configuration.** The cheapest path to
+a real edge is to **retrain the model on data that includes the OOS period**
+(and re-verify IC survives a held-out split) -- not to tune the strategy. A
+model-free fallback (e.g. pure trend/EMA without the ML gate) should also be
+backtested as a baseline, since the ML gate is currently where the IS/OOS cliff
+lives.
+
+
 ## Independence / limits
 
 - One data realisation; no IS/OOS sharding across time beyond the model cutoff.
