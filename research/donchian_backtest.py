@@ -108,6 +108,8 @@ def main(argv=None):
     ap.add_argument("--sweep", action="store_true")
     ap.add_argument("--walk-forward", action="store_true")
     ap.add_argument("--recent", default=None)
+    ap.add_argument("--start", default=None, help="restrict to ts >= YYYY-MM-DD")
+    ap.add_argument("--end", default=None, help="restrict to ts < YYYY-MM-DD")
     a = ap.parse_args(argv)
 
     data = load_daily(a.cache)
@@ -127,6 +129,18 @@ def main(argv=None):
         sub = {s: d[d.index >= pd.Timestamp(a.recent, tz="UTC")] for s, d in data.items()}
         sub = {s: d for s, d in sub.items() if len(d) > 200}
         report(f"RECENT >= {a.recent}", sub, fee_bps=a.fee_bps, **common)
+
+    if a.start or a.end:
+        lo = pd.Timestamp(a.start, tz="UTC") if a.start else None
+        hi = pd.Timestamp(a.end, tz="UTC") if a.end else None
+        window = {s: d[(d.index >= lo if lo is not None else True)
+                       & (d.index < hi if hi is not None else True)]
+                  for s, d in data.items()}
+        # keep symbols with enough intra-window history for the warm-up
+        window = {s: d for s, d in window.items() if len(d) > 60}
+        label = f"WINDOW {a.start or '...'} -> {a.end or '...'}"
+        report(label, window, fee_bps=a.fee_bps, **common)
+        report(f"{label}, zero fees (gross signal)", window, fee_bps=0.0, **common)
 
     if a.sweep:
         print(f"\nSWEEP (basket total %, taker {a.fee_bps}bps) — entry x exit:")
