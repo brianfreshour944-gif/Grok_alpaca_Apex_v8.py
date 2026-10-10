@@ -81,6 +81,7 @@ def backtest_xsec(close: pd.DataFrame, lookback: int, k: int, hold: int,
     equity = 1.0
     eq = np.ones(n)
     daily = np.zeros(n)
+    contrib = pd.Series(0.0, index=syms)      # per-symbol PnL attribution
     traded_total = 0.0
     n_reb = 0
     last_reb = None
@@ -101,7 +102,9 @@ def backtest_xsec(close: pd.DataFrame, lookback: int, k: int, hold: int,
             w = target
             last_reb = i
         r = ret.iloc[i + 1].fillna(0.0)
-        port = float((w * r).sum())
+        leg = w * r
+        contrib += leg
+        port = float(leg.sum())
         equity *= (1.0 + port)
         daily[i + 1] = port
         eq[i + 1] = equity
@@ -112,6 +115,7 @@ def backtest_xsec(close: pd.DataFrame, lookback: int, k: int, hold: int,
     return {
         "equity": pd.Series(eq, index=dates),
         "daily": pd.Series(daily, index=dates),
+        "contrib": contrib,
         "final_equity": float(eq[-1]),
         "total_return": float(eq[-1] - 1.0),
         "sharpe": _sharpe(d),

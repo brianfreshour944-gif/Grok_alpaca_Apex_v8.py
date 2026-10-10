@@ -76,3 +76,11 @@ def test_reverse_flips_the_sign_of_returns():
     fwd = xs.backtest_xsec(df, 30, 2, 5)["daily"]
     rev = xs.backtest_xsec(df, 30, 2, 5, reverse=True)["daily"]
     assert fwd.corr(rev) < 0  # opposite bets on the same ranks
+
+
+def test_contrib_is_per_symbol_and_tracks_daily_pnl():
+    df = _close(n=300, seed=6)
+    r = xs.backtest_xsec(df, 20, 2, 5, fee_bps=0.0)
+    assert list(r["contrib"].index) == list(df.columns)
+    # gross book: summed per-symbol contribution ~= summed daily portfolio PnL
+    assert r["contrib"].sum() == pytest.approx(r["daily"].sum(), rel=1e-9, abs=1e-9)
