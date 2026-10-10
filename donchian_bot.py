@@ -243,7 +243,10 @@ def make_alpaca_broker():
 
     class AlpacaBroker:
         def equity(self) -> float:
-            return float(portfolio.get_buying_power())
+            # Account equity (cash + open positions), NOT buying power: for
+            # crypto/margin accounts buying power can be margin-inflated or read
+            # 0.0, which would mis-size every order. See portfolio.get_account_equity.
+            return float(portfolio.get_account_equity())
 
         def positions(self) -> dict[str, float]:
             # return keys in the RESEARCH convention (BTCUSDT) so plan_rebalance

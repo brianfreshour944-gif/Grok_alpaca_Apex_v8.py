@@ -106,6 +106,21 @@ def get_buying_power() -> float:
         return 0.0
 
 
+def get_account_equity() -> float:
+    """Returns current account equity (cash + open positions), or 0.0 on failure.
+
+    Distinct from buying power: for crypto/margin accounts `buying_power` can
+    exceed equity (margin) or read 0.0, so it is NOT a safe base for position
+    sizing. `equity` is the account's true marked-to-market value at this
+    instant, which is what risk-per-trade sizing needs.
+    """
+    try:
+        return float(trading_client.get_account().equity)
+    except Exception as e:
+        logger.error(f"Account equity fetch failed: {e}")
+        return 0.0
+
+
 async def get_all_positions_async() -> dict:
     """Async wrapper for get_all_positions to avoid blocking the event loop."""
     return await asyncio.to_thread(get_all_positions)
@@ -114,6 +129,11 @@ async def get_all_positions_async() -> dict:
 async def get_buying_power_async() -> float:
     """Async wrapper for get_buying_power to avoid blocking the event loop."""
     return await asyncio.to_thread(get_buying_power)
+
+
+async def get_account_equity_async() -> float:
+    """Async wrapper for get_account_equity to avoid blocking the event loop."""
+    return await asyncio.to_thread(get_account_equity)
 
 
 def _select_largest_position_to_sell() -> dict | None:

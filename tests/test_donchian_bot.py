@@ -159,3 +159,51 @@ def test_trend_filter_needs_enough_history():
     # a 100-bar trend gate cannot fire on a 60-bar series -> stays flat
     short = bot.target_book({"BTCUSDT": _uptrend(n=60)}, 10_000, strategy=bot.ENHANCED)
     assert short == {}
+
+
+def test_alpaca_broker_sizes_off_account_equity(monkeypatch):
+    """The live broker's equity() must use account equity, not buying power.
+
+    Kept dependency-isolated by injecting fakes for the modules make_alpaca_broker
+    imports lazily (alpaca.trading.enums, orders, portfolio), so this test never
+    touches config's real clients.
+    """
+    import sys
+    import types
+
+    calls = {"equity": 0, "buying_power": 0}
+
+    fake_portfolio = types.ModuleType("portfolio")
+
+    def _equity():
+        calls["equity"] += 1
+        return 4242.0
+
+    def _bp():
+        calls["buying_power"] += 1
+        return 0.0
+
+    fake_portfolio.get_account_equity = _equity
+    fake_portfolio.get_buying_power = _bp
+    fake_portfolio.get_all_positions = dict
+
+    fake_orders = types.ModuleType("orders")
+    fake_orders.place_order = lambda *a, **k: True
+
+    fake_alpaca = types.ModuleType("alpaca")
+    fake_trading = types.ModuleType("alpaca.trading")
+    fake_enums = types.ModuleType("alpaca.trading.enums")
+    fake_enums.OrderSide = types.SimpleNamespace(BUY="buy", SELL="sell")
+    fake_trading.enums = fake_enums
+    fake_alpaca.trading = fake_trading
+
+    for name, mod in [("portfolio", fake_portfolio), ("orders", fake_orders),
+                      ("alpaca", fake_alpaca), ("alpaca.trading", fake_trading),
+                      ("alpaca.trading.enums", fake_enums)]:
+        monkeypatch.setitem(sys.modules, name, mod)
+
+    broker = bot.make_alpaca_broker()
+    assert broker.equity() == 4242.0
+    assert calls["equity"] == 1
+    assert calls["buying_power"] == 0        # never consulted for sizing
+    assert broker.positions() == {}
