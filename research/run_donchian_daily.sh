@@ -12,3 +12,5 @@ cd "$(dirname "$0")/.."
 
 python research/fetch_okx_daily.py --days 30
 python donchian_bot.py --paper --ledger donchian_ledger.csv
+# mark the ledger to market: forward performance vs equal-weight buy & hold
+python research/donchian_forward.py --ledger donchian_ledger.csv --cache okx_daily
