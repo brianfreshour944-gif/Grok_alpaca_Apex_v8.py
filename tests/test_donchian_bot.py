@@ -379,3 +379,42 @@ def test_load_source_okx_falls_back_to_cache_on_fetch_error(monkeypatch):
     import research.donchian_backtest as rdb
     monkeypatch.setattr(rdb, "load_daily", lambda cache: sentinel)
     assert bot.load_source("okx", cache="whatever") is sentinel
+
+
+def test_write_close_cache_roundtrip(tmp_path):
+    """Bars saved for the forward report must read back byte-for-byte, with the
+    timestamps preserved (regression: .asi8 truncation made every date 1970)."""
+    from research.xsec_momentum import load_close
+
+    data = {"BTCUSDT": _uptrend(80)}
+    assert bot.write_close_cache(data, str(tmp_path / "c")) == 1
+    close = load_close(str(tmp_path / "c"))
+    assert "BTCUSDT" in close.columns
+    assert len(close) == 80
+    assert close.index[0].year == 2024  # not 1970
+    assert np.allclose(close["BTCUSDT"].dropna().to_numpy(),
+                       data["BTCUSDT"]["close"].to_numpy())
+
+
+def test_cache_universe_trims_to_alpaca_tradeable(tmp_path):
+    """A cached paper book must not contain a leg live could never place."""
+    bot.write_close_cache({"BTCUSDT": _uptrend(80), "ATOMUSDT": _uptrend(80)},
+                          str(tmp_path / "c"))
+    # ATOMUSDT is in the OKX research cache but NOT Alpaca-tradeable.
+    assert bot._cache_universe(str(tmp_path / "c")) == ["BTCUSDT"]
+
+
+def test_main_alpaca_source_falls_back_to_cache_without_keys(monkeypatch, tmp_path):
+    """--source alpaca with no keys must degrade, not crash the cron run."""
+    def boom(*a, **k):
+        raise RuntimeError("Alpaca keys missing")
+
+    monkeypatch.setattr(bot, "fetch_alpaca_daily", boom)
+    monkeypatch.setattr(bot, "fetch_okx_daily", boom)
+    import research.donchian_backtest as rdb
+    monkeypatch.setattr(rdb, "load_daily", lambda cache: {"BTCUSDT": _uptrend(80)})
+    monkeypatch.setattr(bot, "_cache_universe", lambda cache: ["BTCUSDT"])
+    ledger = tmp_path / "l.csv"
+    rc = bot.main(["--paper", "--source", "alpaca", "--ledger", str(ledger)])
+    assert rc == 0
+    assert ledger.exists()
