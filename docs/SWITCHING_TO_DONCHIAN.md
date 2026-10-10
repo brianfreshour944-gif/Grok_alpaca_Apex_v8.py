@@ -24,10 +24,29 @@ and research scripts) is still in the repo, just no longer the container command
 `config.py`'s `trading_client`, i.e. the **same Alpaca keys and `APCA_API_PAPER`
 environment** as every other module.
 
+## Data source: Alpaca, not OKX (important)
+
+The paper run decides from **Alpaca's own daily bars** (`--source alpaca`), for
+two reasons:
+
+- **OKX is geo-blocked here.** Its public API returns `HTTP 403 Forbidden` from
+  US hosts. The old `--source okx` path *swallowed* that error and fell back to
+  the on-disk cache, so the cron looked healthy while computing signals from a
+  **frozen cache**. It never updated.
+- Alpaca bars are the venue where orders actually settle, so the paper book
+  matches what live would do.
+
+The fetched bars are saved to a close cache (`DONCHIAN_CACHE`, default
+`alpaca_daily/`) so the forward report marks the ledger on the **same prices**.
+If the keys are missing the bot degrades to the OKX cache, **trimmed to the
+Alpaca-tradeable symbols** so the paper book never contains a leg live could not
+place, and the banner prints which source it actually used.
+
 ## Three ways to run it
 
-**1. Paper ledger (default, nothing traded, no keys needed).** This is what the
-image runs:
+**1. Paper ledger (default, nothing traded).** This is what the image runs.
+Uses your `APCA_*` keys for Alpaca bars; without them it degrades to the OKX
+cache (10 tradeable symbols) and says so:
 ```bash
 docker run --rm <image>
 # == bash donchian_paper_daily.sh

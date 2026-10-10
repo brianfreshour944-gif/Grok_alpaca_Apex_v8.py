@@ -205,12 +205,51 @@ def alpaca_env() -> str:
     return "paper" if os.getenv("APCA_API_PAPER", "true").lower() == "true" else "live"
 
 
-def load_source(source: str, cache: str = "okx_daily", days: int = 2200) -> dict:
-    """Load daily bars for the bot's universe from OKX (default) or Alpaca.
+def _cache_universe(cache: str) -> list[str]:
+    """Symbols present in a close-cache dir that Alpaca can actually trade.
 
-    OKX is the default so the research stays reproducible; Alpaca is the honest
-    choice for live decisions because it is where orders actually settle. Both
-    return the same {symbol: DataFrame(high/low/close)} shape.
+    A cached paper book must not contain legs live could never place, so the
+    OKX research cache (15 names) is trimmed to the Alpaca-tradeable subset."""
+    try:
+        from research.xsec_momentum import load_close
+        cols = list(load_close(cache).columns)
+    except Exception:  # noqa: BLE001 — a missing/odd cache just means "no filter"
+        return []
+    return [s for s in cols if s in ALPACA_TRADEABLE]
+
+
+def write_close_cache(data: dict, cache: str) -> int:
+    """Persist fetched bars as a close cache (the shape load_close reads) so the
+    forward report marks the ledger on the SAME prices the bot decided on.
+
+    Writes {symbol}_1D.csv with open_time(ms) + close. Returns symbols written."""
+    p = Path(cache)
+    p.mkdir(parents=True, exist_ok=True)
+    n = 0
+    for sym, df in data.items():
+        if "close" not in df.columns:
+            continue
+        # .asi8 is in the index's OWN unit (ms for venue bars), so convert to ns
+        # first — otherwise //10**6 silently truncates the epoch to ~7 digits.
+        idx = pd.DatetimeIndex(df.index)
+        if idx.tz is not None:
+            idx = idx.tz_convert("UTC").tz_localize(None)
+        open_time_ms = idx.astype("datetime64[ns]").astype("int64") // 10**6
+        pd.DataFrame({
+            "open_time": open_time_ms,
+            "close": df["close"].to_numpy(),
+        }).to_csv(p / f"{sym}_1D.csv", index=False)
+        n += 1
+    return n
+
+
+def load_source(source: str, cache: str = "okx_daily", days: int = 2200) -> dict:
+    """Load daily bars for the bot's universe from OKX or Alpaca.
+
+    Alpaca is the honest choice for this deployment: it is where orders settle
+    and, unlike OKX's public API, it is not geo-blocked. The OKX path remains for
+    reproducible research and falls back to the on-disk cache when the network is
+    unavailable. Both return {symbol: DataFrame(high/low/close)}.
     """
     if source == "okx":
         try:
@@ -222,7 +261,11 @@ def load_source(source: str, cache: str = "okx_daily", days: int = 2200) -> dict
             return data
         # fall back to the on-disk research cache if the live fetch is unavailable
         from research.donchian_backtest import load_daily
-        return load_daily(cache)
+        data = load_daily(cache)
+        keep = set(_cache_universe(cache))
+        if keep:
+            data = {k: v for k, v in data.items() if k in keep}
+        return data
     if source == "alpaca":
         return fetch_alpaca_daily(default_universe(), days=days)
     raise ValueError(f"unknown source {source!r} (use 'okx' or 'alpaca')")
@@ -485,6 +528,9 @@ def main(argv=None):
     ap.add_argument("--live", action="store_true", help="submit real orders")
     ap.add_argument("--i-understand-the-risk", action="store_true", dest="ack")
     ap.add_argument("--ledger", default="donchian_ledger.csv")
+    ap.add_argument("--save-cache", metavar="DIR", default=None,
+                    help="persist the fetched bars as a close cache so the forward "
+                         "report marks the ledger on the SAME prices")
     ap.add_argument("--equity", type=float, default=DEFAULT_EQUITY)
     ap.add_argument("--base", action="store_true",
                     help="use the textbook rule instead of the enhanced (trend gate + pyramid) default")
@@ -497,15 +543,26 @@ def main(argv=None):
         print("nothing to do: pass --paper (default safe) or --live --i-understand-the-risk")
         return 2
 
+    source = a.source
     try:
-        data = load_source(a.source, cache=a.cache, days=a.days)
+        data = load_source(source, cache=a.cache, days=a.days)
     except Exception as e:  # noqa: BLE001 — surface any load failure as exit 1
-        print(f"failed to load {a.source} data: {e}")
-        return 1
+        if source == "alpaca":
+            # no keys / API unreachable: degrade to the venue-accurate research
+            # cache rather than fail the whole cron run.
+            print(f"alpaca bars unavailable ({e}); falling back to {a.cache}")
+            source = "okx"
+            data = load_source("okx", cache=a.cache, days=a.days)
+        else:
+            print(f"failed to load {source} data: {e}")
+            return 1
     if not data:
         print(f"no data from source={a.source}"
-              + (f" (cache {a.cache}/ empty — run research/fetch_okx_daily.py)" if a.source == "okx" else ""))
+              + (f" (cache {a.cache}/ empty — run research/fetch_okx_daily.py)" if source == "okx" else ""))
         return 1
+    if a.save_cache:
+        n = write_close_cache(data, a.save_cache)
+        print(f"saved {n} symbols to close cache {a.save_cache}/")
     strategy = BASE if a.base else ENHANCED
     mode = "base" if a.base else "enhanced"
     date = max(df.index.max() for df in data.values()).date().isoformat()
@@ -513,7 +570,7 @@ def main(argv=None):
     decisions = run_cycle(data, broker, date, ledger=a.ledger if a.paper else None,
                           live=a.live, strategy=strategy, mode=mode)
     env = f"  alpaca_env={alpaca_env()}" if a.live else ""
-    print(f"{date}  {'LIVE' if a.live else 'PAPER'}  source={a.source}  mode={mode}  "
+    print(f"{date}  {'LIVE' if a.live else 'PAPER'}  source={source}  mode={mode}  "
           f"equity={broker.equity():.2f}  symbols={len(data)}{env}")
     for d in decisions:
         if d.side != "hold":
