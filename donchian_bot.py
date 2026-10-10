@@ -16,6 +16,8 @@
 # Alpaca keys: this module never reads a key. The live broker imports
 # portfolio/orders, which use config's trading_client built from the env vars
 # APCA_API_KEY_ID / APCA_API_SECRET_KEY — the same keys as every other module.
+# The Alpaca ENVIRONMENT is APCA_API_PAPER (default true = paper); the live
+# banner prints which one is in effect.
 from __future__ import annotations
 
 import argparse
@@ -192,6 +194,15 @@ def default_universe() -> list[str]:
     if override:
         return [s.strip() for s in override.split(",") if s.strip()]
     return sorted(ALPACA_TRADEABLE)
+
+
+def alpaca_env() -> str:
+    """Which Alpaca environment the live client will hit: 'paper' or 'live'.
+
+    Mirrors config.PAPER (`APCA_API_PAPER`, default true) WITHOUT importing
+    config, so the banner never needs real keys. Defaults to 'paper' — the safe,
+    user-chosen target."""
+    return "paper" if os.getenv("APCA_API_PAPER", "true").lower() == "true" else "live"
 
 
 def load_source(source: str, cache: str = "okx_daily", days: int = 2200) -> dict:
@@ -501,8 +512,9 @@ def main(argv=None):
     broker = make_alpaca_broker() if a.live else PaperBroker(a.equity)
     decisions = run_cycle(data, broker, date, ledger=a.ledger if a.paper else None,
                           live=a.live, strategy=strategy, mode=mode)
+    env = f"  alpaca_env={alpaca_env()}" if a.live else ""
     print(f"{date}  {'LIVE' if a.live else 'PAPER'}  source={a.source}  mode={mode}  "
-          f"equity={broker.equity():.2f}  symbols={len(data)}")
+          f"equity={broker.equity():.2f}  symbols={len(data)}{env}")
     for d in decisions:
         if d.side != "hold":
             print(f"  {d.side:<4} {d.symbol:<9} Δw={d.delta_weight:+.3f} "

@@ -361,6 +361,15 @@ def test_load_source_unknown_raises():
         bot.load_source("nasdaq")
 
 
+def test_alpaca_env_defaults_to_paper(monkeypatch):
+    monkeypatch.delenv("APCA_API_PAPER", raising=False)
+    assert bot.alpaca_env() == "paper"
+    monkeypatch.setenv("APCA_API_PAPER", "true")
+    assert bot.alpaca_env() == "paper"
+    monkeypatch.setenv("APCA_API_PAPER", "false")
+    assert bot.alpaca_env() == "live"
+
+
 def test_load_source_okx_falls_back_to_cache_on_fetch_error(monkeypatch):
     def boom(*a, **k):
         raise RuntimeError("403 Forbidden")

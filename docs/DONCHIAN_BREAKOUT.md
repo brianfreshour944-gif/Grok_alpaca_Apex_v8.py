@@ -176,6 +176,11 @@ notional falls below Alpaca's crypto minimum (`MIN_ORDER_NOTIONAL`, default $1,
 override with `DONCHIAN_MIN_NOTIONAL`) are skipped locally rather than sent to
 be rejected. Sizing uses the account's **equity**, not buying power.
 
+**Target account:** the live path talks to Alpaca's **paper** account by default
+(`APCA_API_PAPER` defaults to `true`; set it to `false` to permit live money).
+The run banner prints `alpaca_env=paper|live` when `--live` is used, so the
+environment in effect is always visible.
+
 Cron (paper only), 01:30 UTC:
 ```
 30 1 * * * cd /path/to/repo && bash research/run_donchian_daily.sh >> donchian_daily.log 2>&1
