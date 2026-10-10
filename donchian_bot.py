@@ -557,9 +557,11 @@ def main(argv=None):
             print(f"failed to load {source} data: {e}")
             return 1
     if not data:
-        print(f"no data from source={a.source}"
-              + (f" (cache {a.cache}/ empty — run research/fetch_okx_daily.py)" if source == "okx" else ""))
-        return 1
+        # A scheduled/container run must not exit non-zero just because the venue
+        # is unreachable (that crash-loops the platform). Explain and stop.
+        print(f"no data available (source={a.source}, cache={a.cache}). "
+              f"Check APCA_API_KEY_ID / APCA_API_SECRET_KEY; skipping this run.")
+        return 0
     if a.save_cache:
         n = write_close_cache(data, a.save_cache)
         print(f"saved {n} symbols to close cache {a.save_cache}/")

@@ -418,3 +418,16 @@ def test_main_alpaca_source_falls_back_to_cache_without_keys(monkeypatch, tmp_pa
     rc = bot.main(["--paper", "--source", "alpaca", "--ledger", str(ledger)])
     assert rc == 0
     assert ledger.exists()
+
+
+def test_main_no_data_exits_zero(monkeypatch, tmp_path):
+    """No venue and no cache -> exit 0, so the platform does not crash-loop."""
+    def boom(*a, **k):
+        raise RuntimeError("HTTP Error 401: Unauthorized")
+
+    monkeypatch.setattr(bot, "fetch_alpaca_daily", boom)
+    monkeypatch.setattr(bot, "fetch_okx_daily", boom)
+    import research.donchian_backtest as rdb
+    monkeypatch.setattr(rdb, "load_daily", lambda cache: {})
+    assert bot.main(["--paper", "--source", "alpaca",
+                     "--ledger", str(tmp_path / "l.csv")]) == 0

@@ -86,6 +86,16 @@ From `docs/DONCHIAN_BREAKOUT.md` and the forward ledger:
 
 Paper-trade first. Do not put real money behind it on these numbers.
 
+## If it exits or restarts in a tight loop
+
+The entrypoint loops (run + idle) so one container covers many days. If the
+platform logs a run every few seconds instead, either `DONCHIAN_ONESHOT=1` is set
+(use cron) or the loop is being killed. Check `APCA_API_KEY_ID` /
+`APCA_API_SECRET_KEY` in the platform's env: an `HTTP 401 Unauthorized` from
+Alpaca means the keys are present but **rejected** (wrong values, or a paper key
+against the live base URL, or vice-versa). With no venue data and no cache the
+bot prints a message and moves on rather than exiting non-zero.
+
 ## Rollback (how to go back to Grok Apex)
 
 One line — restore the original container command:
@@ -97,6 +107,10 @@ sed -i 's|CMD \["bash", "donchian_paper_daily.sh"\]|CMD ["python", "main_bot.py"
 Then rebuild/redeploy. Nothing else needs undoing: the Apex code, model, and
 config were never removed, and the env vars it reads are all still in
 `.env.example`.
+
+By default the container loops: run, then idle `DONCHIAN_IDLE_SLEEP` (default
+3600s), repeat — so one container produces the daily rows. Set
+`DONCHIAN_ONESHOT=1` to run once and exit (cron/one-shot).
 
 ## Scheduling (optional)
 
