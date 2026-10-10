@@ -149,3 +149,70 @@ def test_backtest_exposure_in_unit_interval():
     r = db.backtest_donchian(df)
     assert 0.0 <= r["exposure"] <= 1.0
     assert -1.0 <= r["max_drawdown"] <= 0.0
+
+
+# ── enhancements ──────────────────────────────────────────────────────────────
+def test_defaults_reproduce_base_strategy():
+    """Neutral enhancement values must be a no-op vs the textbook rule."""
+    df = _trending(n=300, slope=0.01, noise=0.02, seed=7)
+    r = db.backtest_donchian(df)
+    explicit = db.backtest_donchian(df, trend_filter=0, exit_mode="band",
+                                    pyramid_units=1, trail_atr=0.0)
+    assert r["final_equity"] == pytest.approx(explicit["final_equity"], rel=1e-12)
+    assert r["n_trades"] == explicit["n_trades"]
+
+
+def test_trend_filter_blocks_countertrend_entries():
+    sig = db.breakout_signal(*_ohlc(_trending(n=80, slope=-0.01, seed=2)),
+                             entry=5, exit=3, trend_filter=0)
+    gated = db.breakout_signal(*_ohlc(_trending(n=80, slope=-0.01, seed=2)),
+                               entry=5, exit=3, trend_filter=50)
+    # downtrend: ungated may have long breakouts; the gate must remove them
+    assert gated.sum() <= sig.sum()
+    assert not (gated == 1).any()
+
+
+def test_trend_mask_is_causal_and_signed():
+    c = np.array([1.0, 2, 3, 4, 5, 4, 3, 2, 1])
+    m = db.trend_mask(c, 3)
+    assert m[4] is np.True_                   # above SMA
+    assert m[-1] is np.False_                 # below SMA
+    assert db.trend_mask(c, 0).all()          # off -> all True
+
+
+def test_midpoint_exit_books_profit_sooner():
+    # a run-up then a partial give-back: midpoint exit should leave earlier
+    close = list(np.linspace(100, 140, 40)) + list(np.linspace(139, 130, 10))
+    df = _df([c * 1.001 for c in close], [c * 0.999 for c in close], close)
+    band = db.breakout_signal(df["high"], df["low"], df["close"], 20, 10, exit_mode="band")
+    mid = db.breakout_signal(df["high"], df["low"], df["close"], 20, 10, exit_mode="midpoint")
+    assert mid.sum() <= band.sum()
+
+
+def test_pyramiding_adds_units_and_raises_exposure_pnl():
+    df = _trending(n=400, slope=0.02, noise=0.005, seed=11)
+    one = db.backtest_donchian(df, fee_bps=0.0, pyramid_units=1)
+    four = db.backtest_donchian(df, fee_bps=0.0, pyramid_units=4)
+    # a clean trend should have at least one add in the 4-unit run
+    assert (four["trades"]["n_units"] > 1).any()
+    assert not (one["trades"]["n_units"] > 1).any()
+    assert four["final_equity"] > one["final_equity"]
+
+
+def test_trailing_stop_tightens_over_time():
+    df = _trending(n=300, slope=0.03, noise=0.01, seed=13)
+    fixed = db.backtest_donchian(df, fee_bps=0.0, trail_atr=0.0)
+    trail = db.backtest_donchian(df, fee_bps=0.0, trail_atr=2.0)
+    # a trailing stop can only exit at or before the band exit -> never more bars held
+    assert trail["exposure"] <= fixed["exposure"] + 1e-9
+
+
+def test_pnl_reconciles_with_enhancements():
+    df = _trending(n=500, slope=0.015, noise=0.02, seed=17)
+    r = db.backtest_donchian(df, trend_filter=100, pyramid_units=2, fee_bps=25.0)
+    assert r["trades"]["pnl"].sum() == pytest.approx(
+        r["final_equity"] - r["initial_equity"], rel=1e-9)
+
+
+def _ohlc(df):
+    return df["high"].to_numpy(), df["low"].to_numpy(), df["close"].to_numpy()

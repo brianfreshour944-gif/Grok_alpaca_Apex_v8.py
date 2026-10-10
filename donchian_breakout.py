@@ -30,6 +30,18 @@ DEFAULT_RISK_PCT = 0.01
 DEFAULT_FEE_BPS = 25.0     # Alpaca crypto taker, per side (config.ESTIMATED_TAKER_FEE_BPS)
 DEFAULT_STOP_ATR = 2.0
 
+# ── enhancements (opt-in; each is OFF at its neutral value) ────────────────────
+# These are the standard Donchian/Turtle refinements. They are additive: with
+# trend_filter=0, pyramid_units=1, trail_atr=0 and exit_mode="band" the code
+# reduces EXACTLY to the base strategy (a test pins that).
+DEFAULT_TREND_FILTER = 0    # 0 = off; else require close on the trend side of
+                            # an N-bar SMA before entering (regime gate)
+DEFAULT_EXIT_MODE = "band"  # "band" = opposite Donchian band; "midpoint" = the
+                            # exit band's midpoint (exits sooner, keeps more)
+DEFAULT_PYRAMID_UNITS = 1   # max total units (Turtle added up to 4)
+DEFAULT_PYRAMID_ATR = 0.5   # add a unit every this many ATRs in the trend's favour
+DEFAULT_TRAIL_ATR = 0.0     # >0 ratchets the stop to (extreme close - trail_atr*ATR)
+
 
 def donchian_channel(high, low, window: int) -> tuple[np.ndarray, np.ndarray]:
     """Rolling Donchian band from the `window` bars *before* each bar.
@@ -55,27 +67,58 @@ def atr(high, low, close, window: int = DEFAULT_ATR) -> np.ndarray:
     return pd.Series(tr).rolling(window).mean().to_numpy()
 
 
+def trend_mask(close, window: int) -> np.ndarray:
+    """Boolean array: close is STRICTLY above its `window`-bar SMA.
+
+    Used as a long-only regime gate — the classic false-breakout filter. The
+    SMA at bar i uses closes up to and including i (available at that close),
+    so gating entries on it is look-ahead-free. window<=0 -> all True (off).
+    """
+    c = np.asarray(close, dtype=float)
+    if window <= 0:
+        return np.ones(len(c), dtype=bool)
+    sma = pd.Series(c).rolling(window).mean().to_numpy()
+    return c > sma
+
+
 def breakout_signal(high, low, close, entry: int = DEFAULT_ENTRY,
-                    exit: int = DEFAULT_EXIT, allow_short: bool = False) -> np.ndarray:
+                    exit: int = DEFAULT_EXIT, allow_short: bool = False,
+                    trend_filter: int = DEFAULT_TREND_FILTER,
+                    exit_mode: str = DEFAULT_EXIT_MODE) -> np.ndarray:
     """Stateful Donchian position in {-1, 0, +1} per bar.
 
-    Long entry when close > upper(entry); long exit when close < lower(exit).
-    With `allow_short`, the mirror image is added: short entry when
-    close < lower(entry); short exit when close > upper(exit). The exit test is
-    evaluated before the entry test each bar, so a single bar can never both
-    enter and exit. Flat until the entry band exists (first `entry` bars).
+    Long entry when close > upper(entry); long exit when close crosses the exit
+    level. With `allow_short`, the mirror image is added. The exit test runs
+    before the entry test, so a single bar can never both enter and exit. Flat
+    until the entry band exists (first `entry` bars).
+
+    `trend_filter` (>0): also require `close > SMA(trend_filter)` to enter long
+    (and `close < SMA` to enter short) — a regime gate that suppresses
+    counter-trend false breakouts. Exits are never gated.
+
+    `exit_mode`: "band" exits when close crosses the opposite `exit` band (the
+    textbook rule); "midpoint" exits when close crosses that band's MIDPOINT,
+    which books profit sooner and reduces give-back on failed breakouts.
     """
     c = np.asarray(close, dtype=float)
     up_e, lo_e = donchian_channel(high, low, entry)
     up_x, lo_x = donchian_channel(high, low, exit)
+    if exit_mode == "midpoint":
+        exit_long = (lo_x + up_x) / 2.0            # exit long below the mid
+        exit_short = (lo_x + up_x) / 2.0
+    else:
+        exit_long, exit_short = lo_x, up_x
+    ok = trend_mask(c, trend_filter)
+    gated = trend_filter > 0                       # only gate entries when on
     state = np.zeros(len(c), dtype=np.int8)
     pos = 0
     for i in range(len(c)):
-        if np.isnan(up_e[i]) or pos == 1 and c[i] < lo_x[i] or pos == -1 and c[i] > up_x[i]:
+        if np.isnan(up_e[i]) or pos == 1 and c[i] < exit_long[i] \
+                or pos == -1 and c[i] > exit_short[i]:
             pos = 0
-        elif pos == 0 and c[i] > up_e[i]:
+        elif pos == 0 and c[i] > up_e[i] and (ok[i] or not gated):
             pos = 1
-        elif allow_short and pos == 0 and c[i] < lo_e[i]:
+        elif allow_short and pos == 0 and c[i] < lo_e[i] and (not ok[i] or not gated):
             pos = -1
         state[i] = pos
     return state
@@ -111,7 +154,12 @@ def backtest_donchian(df: pd.DataFrame, entry: int = DEFAULT_ENTRY, exit: int = 
                       atr_window: int = DEFAULT_ATR, risk_pct: float = DEFAULT_RISK_PCT,
                       fee_bps: float = DEFAULT_FEE_BPS, stop_atr: float = DEFAULT_STOP_ATR,
                       allow_short: bool = False, initial_equity: float = 10_000.0,
-                      periods_per_year: int = 365) -> dict:
+                      periods_per_year: int = 365,
+                      trend_filter: int = DEFAULT_TREND_FILTER,
+                      exit_mode: str = DEFAULT_EXIT_MODE,
+                      pyramid_units: int = DEFAULT_PYRAMID_UNITS,
+                      pyramid_atr: float = DEFAULT_PYRAMID_ATR,
+                      trail_atr: float = DEFAULT_TRAIL_ATR) -> dict:
     """Single-asset Donchian backtest with realistic per-side fees and a stop.
 
     `df` needs columns high/low/close. Decisions are made at each bar's CLOSE
@@ -120,6 +168,14 @@ def backtest_donchian(df: pd.DataFrame, entry: int = DEFAULT_ENTRY, exit: int = 
     pierces the protective stop exits intra-bar at the stop price (conservative:
     assumes the stop is touched, not gapped through favourably). Fees are
     charged on the traded notional at every position change, both entry and exit.
+
+    Enhancements (all OFF at their neutral defaults, so the base strategy is
+    reproduced exactly):
+      * `trend_filter` — require close on the trend side of an SMA to enter;
+      * `exit_mode="midpoint"` — exit on the exit band's midpoint;
+      * `pyramid_units`/`pyramid_atr` — add units as the trade moves in favour
+        (Turtle add-units), so winners get a bigger position;
+      * `trail_atr` — ratchet the stop behind the running extreme.
 
     Equity is the single source of truth: a trade's PnL is the equity change
     between opening and closing, so fees and marks can never drift out of sync.
@@ -137,51 +193,82 @@ def backtest_donchian(df: pd.DataFrame, entry: int = DEFAULT_ENTRY, exit: int = 
     if n < max(entry, exit, atr_window) + 2:
         raise ValueError("not enough bars for the requested windows")
 
-    sig = breakout_signal(hi, lo, o, entry, exit, allow_short)
+    sig = breakout_signal(hi, lo, o, entry, exit, allow_short,
+                          trend_filter=trend_filter, exit_mode=exit_mode)
     a = atr(hi, lo, o, atr_window)
     cost = fee_bps / 1e4
 
     equity = float(initial_equity)
     eq_curve = np.empty(n)
     pos = 0                 # current direction, -1/0/+1
-    units = 0.0             # absolute units held
-    entry_price = 0.0
+    units = 0.0             # absolute base-asset units held (all adds, summed)
+    n_units = 0             # how many units have been added
+    avg_entry = 0.0
+    a_entry = np.nan
+    next_add = np.nan       # price at which the next unit is added
+    extreme = np.nan        # running favourable extreme for the trailing stop
     stop_price = np.nan
     entry_index = -1
     entry_equity = equity
     trades: list[dict] = []
 
-    def _open(i: int, want: int) -> None:
-        nonlocal pos, units, entry_price, stop_price, entry_equity, entry_index, equity
+    def _unit_size(i: int) -> float:
         u = turtle_units(o[i], a[i], risk_pct)
-        if u <= 0:
+        return (u * equity) / o[i] if u > 0 and o[i] > 0 else 0.0
+
+    def _open(i: int) -> None:
+        nonlocal pos, units, n_units, avg_entry, a_entry, next_add, extreme
+        nonlocal stop_price, entry_index, entry_equity, equity
+        q = _unit_size(i)
+        if q <= 0 or not np.isfinite(a[i]):
             return
-        notional = u * equity
-        units = notional / o[i]
-        entry_price = o[i]
-        equity -= notional * cost                      # entry fee
-        pos = want
+        units = q
+        n_units = 1
+        avg_entry = o[i]
+        a_entry = a[i]
+        pos = 1 if sig[i] > 0 else -1
         entry_index = i
+        # record equity BEFORE the entry fee so the trade's PnL includes every
+        # fee it incurs (entry, adds, exit) and sum(PnL) == equity change.
         entry_equity = equity
-        stop_price = entry_price - stop_atr * a[i] if pos > 0 else entry_price + stop_atr * a[i]
+        equity -= units * o[i] * cost                  # entry fee
+        extreme = o[i]
+        stop_price = avg_entry - stop_atr * a[i] if pos > 0 else avg_entry + stop_atr * a[i]
+        next_add = avg_entry + pyramid_atr * a[i] if pos > 0 else avg_entry - pyramid_atr * a[i]
+
+    def _add_unit(i: int) -> None:
+        nonlocal units, n_units, avg_entry, next_add, equity
+        q = _unit_size(i)
+        if q <= 0:
+            return
+        avg_entry = (avg_entry * units + o[i] * q) / (units + q)
+        units += q
+        n_units += 1
+        equity -= q * o[i] * cost                      # fee on the added notional
+        next_add = avg_entry + pyramid_atr * a_entry if pos > 0 else avg_entry - pyramid_atr * a_entry
 
     def _close(i: int, price: float, reason: str) -> None:
-        nonlocal pos, units, stop_price, equity
+        nonlocal pos, units, n_units, stop_price, equity
         equity -= units * price * cost                 # exit fee
         pnl = equity - entry_equity
         trades.append({
             "entry_index": entry_index, "exit_index": i,
             "side": "long" if pos > 0 else "short",
-            "entry_price": entry_price, "exit_price": price,
-            "units": units, "reason": reason, "pnl": pnl,
+            "entry_price": avg_entry, "exit_price": price,
+            "units": units, "n_units": n_units, "reason": reason, "pnl": pnl,
             "return_on_entry_equity": pnl / entry_equity if entry_equity else 0.0,
         })
-        pos, units, stop_price = 0, 0.0, np.nan
+        pos, units, n_units, stop_price = 0, 0.0, 0, np.nan
 
     for i in range(n):
         # 1) mark the position carried in from the previous close to this close.
         if pos != 0 and i > 0:
             equity += units * (o[i] - o[i - 1]) * (1.0 if pos > 0 else -1.0)
+            # ratchet the trailing stop behind the running favourable extreme.
+            if trail_atr > 0:
+                extreme = max(extreme, o[i]) if pos > 0 else min(extreme, o[i])
+                candidate = extreme - trail_atr * a[i] if pos > 0 else extreme + trail_atr * a[i]
+                stop_price = max(stop_price, candidate) if pos > 0 else min(stop_price, candidate)
 
         # 2) protective stop against this bar's range (intra-bar).
         if pos != 0 and np.isfinite(stop_price):
@@ -190,13 +277,19 @@ def backtest_donchian(df: pd.DataFrame, entry: int = DEFAULT_ENTRY, exit: int = 
                 equity += units * (stop_price - o[i - 1]) * (1.0 if pos > 0 else -1.0)
                 _close(i, stop_price, "stop")
 
-        # 3) act on the signal known at this close.
+        # 3) pyramid: add a unit if price advanced pyramid_atr*A past the last add.
+        if pos != 0 and n_units < pyramid_units and np.isfinite(next_add):
+            reached = o[i] >= next_add if pos > 0 else o[i] <= next_add
+            if reached and np.isfinite(a[i]) and a[i] > 0:
+                _add_unit(i)
+
+        # 4) act on the signal known at this close.
         want = int(sig[i])
         if want != pos:
             if pos != 0:
                 _close(i, o[i], "signal")
             if want != 0:
-                _open(i, want)
+                _open(i)
 
         eq_curve[i] = equity
 

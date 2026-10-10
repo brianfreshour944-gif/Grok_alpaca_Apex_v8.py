@@ -28,6 +28,17 @@ MAX_POSITION_PCT = 0.20     # matches config.MAX_POSITION_PCT
 MAX_GROSS_PCT = 1.00        # no leverage across the book
 DEFAULT_EQUITY = 10_000.0
 
+# Strategy config for the bot. BASE is the textbook rule; ENHANCED adds the
+# refinements that survived the out-of-sample walk-forward in
+# research/donchian_improve.py: a long-term trend gate, the channel-midpoint
+# exit, and one pyramid add. On 15 symbols 2020-2026 ENHANCED beat BASE on 4/4
+# test folds (the only candidate with a positive out-of-sample Sharpe) and
+# improved both Sharpe (0.73 -> 0.79) and return/drawdown (3.69 -> 5.69). The
+# trailing stop was tested and REJECTED (0/4 folds). `--base` reproduces the
+# textbook rule. Neither is a promise; 4 folds is suggestive, not conclusive.
+BASE = {}
+ENHANCED = {"trend_filter": 100, "exit_mode": "midpoint", "pyramid_units": 2}
+
 # Alpaca's universe is a SUBSET of the OKX research universe and it quotes
 # pairs with a slash (BTC/USD) while OKX uses no separator (BTCUSDT). Only
 # symbols present here are tradeable live; the rest are research-only and are
@@ -66,33 +77,70 @@ class Decision:
     reason: str
 
 
-def latest_signal(df: pd.DataFrame) -> tuple[int, float, float]:
-    """Return (signal, price, atr) at the most recent close. `df` needs
-    high/low/close and at least entry+1 rows."""
+# breakout_signal()'s own keywords; anything else in a strategy dict is an
+# execution lever handled here (pyramiding), not by the signal.
+_SIGNAL_KEYS = ("trend_filter", "exit_mode", "allow_short")
+
+
+def _split_strategy(strategy: dict | None) -> tuple[dict, dict]:
+    s = strategy or {}
+    return {k: v for k, v in s.items() if k in _SIGNAL_KEYS}, \
+           {k: v for k, v in s.items() if k not in _SIGNAL_KEYS}
+
+
+def units_for_trend(price: float, band: float, atr_value: float,
+                    max_units: int = db.DEFAULT_PYRAMID_UNITS,
+                    step_atr: float = db.DEFAULT_PYRAMID_ATR) -> int:
+    """How many Turtle units a live long should hold, given how far the price has
+    run ABOVE the entry band (stateless, causal — uses only the current bar).
+
+    One unit at the breakout; one more for every `step_atr` ATRs of progress,
+    capped at `max_units`. This mirrors the backtest's pyramid adds without
+    needing to remember the entry price across cycles.
+    """
+    if max_units <= 1 or not np.isfinite(atr_value) or atr_value <= 0:
+        return max(1, int(max_units))
+    progress = (price - band) / (atr_value * step_atr)
+    return int(min(max_units, 1 + max(0, np.floor(progress))))
+
+
+def latest_signal(df: pd.DataFrame, strategy: dict | None = None):
+    """Return (signal, price, atr, entry_band) at the most recent close. `df`
+    needs high/low/close and at least entry+1 rows. `strategy` is a kwargs-style
+    dict (e.g. donchian_bot.ENHANCED); signal-only keys are passed through."""
+    sig_kw, _ = _split_strategy(strategy)
     sig = db.breakout_signal(df["high"], df["low"], df["close"],
-                             db.DEFAULT_ENTRY, db.DEFAULT_EXIT)
+                             db.DEFAULT_ENTRY, db.DEFAULT_EXIT, **sig_kw)
     a = db.atr(df["high"], df["low"], df["close"], db.DEFAULT_ATR)
-    return int(sig[-1]), float(df["close"].iloc[-1]), float(a[-1])
+    up, _ = db.donchian_channel(df["high"], df["low"], db.DEFAULT_ENTRY)
+    return int(sig[-1]), float(df["close"].iloc[-1]), float(a[-1]), float(up[-1])
 
 
 def target_book(data: dict[str, pd.DataFrame], equity: float,
                 risk_pct: float = db.DEFAULT_RISK_PCT,
                 max_position_pct: float = MAX_POSITION_PCT,
-                max_gross_pct: float = MAX_GROSS_PCT) -> dict[str, Target]:
+                max_gross_pct: float = MAX_GROSS_PCT,
+                strategy: dict | None = None) -> dict[str, Target]:
     """Target signed notional weights for every symbol with a live signal.
 
     Each active symbol is sized by turtle_units (a 1-ATR move costs risk_pct),
+    scaled by how many Turtle units the current trend warrants (pyramiding),
     capped at max_position_pct, then the whole book is scaled down so gross
     exposure never exceeds max_gross_pct. Long-only by default.
     """
+    _, exec_kw = _split_strategy(strategy)
+    max_units = int(exec_kw.get("pyramid_units", db.DEFAULT_PYRAMID_UNITS))
+    step_atr = float(exec_kw.get("pyramid_atr", db.DEFAULT_PYRAMID_ATR))
     raw: dict[str, Target] = {}
     for sym, df in data.items():
         if len(df) < db.DEFAULT_ENTRY + 2:
             continue
-        sig, price, a = latest_signal(df)
+        sig, price, a, band = latest_signal(df, strategy)
         if sig == 0 or not np.isfinite(a):
             continue
-        w = db.turtle_units(price, a, risk_pct, max_notional_pct=max_position_pct)
+        units = units_for_trend(price, band, a, max_units, step_atr) if sig > 0 else 1
+        w = db.turtle_units(price, a, risk_pct, max_notional_pct=max_position_pct) * units
+        w = min(w, max_position_pct)
         if w > 0:
             raw[sym] = Target(sym, sig, price, a, sig * w)
     gross = sum(abs(t.weight) for t in raw.values())
@@ -133,10 +181,11 @@ def plan_rebalance(targets: dict[str, Target], current: dict[str, float],
 
 
 # ── forward ledger ─────────────────────────────────────────────────────────────
-LEDGER_COLS = ["date", "equity", "book", "gross_weight", "n_legs"]
+LEDGER_COLS = ["date", "equity", "mode", "book", "gross_weight", "n_legs"]
 
 
-def append_ledger(path: str, date: str, equity: float, book: dict[str, Target]) -> bool:
+def append_ledger(path: str, date: str, equity: float, book: dict[str, Target],
+                  mode: str = "base") -> bool:
     """Append one hypothetical daily book row, idempotent by date. Returns True
     if a row was written (False if the date already existed)."""
     p = Path(path)
@@ -147,7 +196,7 @@ def append_ledger(path: str, date: str, equity: float, book: dict[str, Target]) 
     if any(r["date"] == date for r in rows):
         return False
     rows.append({
-        "date": date, "equity": f"{equity:.2f}",
+        "date": date, "equity": f"{equity:.2f}", "mode": mode,
         "book": "|".join(f"{s}:{t.signal}:{t.weight:+.3f}" for s, t in sorted(book.items())),
         "gross_weight": f"{sum(abs(t.weight) for t in book.values()):.3f}",
         "n_legs": str(len(book)),
@@ -221,16 +270,17 @@ def make_alpaca_broker():
 
 
 def run_cycle(data: dict[str, pd.DataFrame], broker, date: str,
-              ledger: str | None = None, live: bool = False) -> list[Decision]:
+              ledger: str | None = None, live: bool = False,
+              strategy: dict | None = None, mode: str = "base") -> list[Decision]:
     """One rebalance cycle: read broker state, plan, and act. A plain function so
     it can be tested with a fake broker and no network."""
     equity = broker.equity()
     prices = {s: float(df["close"].iloc[-1]) for s, df in data.items()}
-    targets = target_book(data, equity)
+    targets = target_book(data, equity, strategy=strategy)
     current = current_weights(broker.positions(), prices, equity)
     decisions = plan_rebalance(targets, current)
     if ledger:
-        append_ledger(ledger, date, equity, targets)
+        append_ledger(ledger, date, equity, targets, mode=mode)
     if live:
         # Only symbols Alpaca actually lists may be traded live; research-only
         # symbols are logged in the ledger but never ordered.
@@ -251,6 +301,8 @@ def main(argv=None):
     ap.add_argument("--i-understand-the-risk", action="store_true", dest="ack")
     ap.add_argument("--ledger", default="donchian_ledger.csv")
     ap.add_argument("--equity", type=float, default=DEFAULT_EQUITY)
+    ap.add_argument("--base", action="store_true",
+                    help="use the textbook rule instead of the enhanced (trend gate + pyramid) default")
     a = ap.parse_args(argv)
 
     if a.live and not a.ack:
@@ -265,11 +317,13 @@ def main(argv=None):
     if not data:
         print(f"no data in {a.cache}/ — run research/fetch_okx_daily.py first")
         return 1
+    strategy = BASE if a.base else ENHANCED
+    mode = "base" if a.base else "enhanced"
     date = max(df.index.max() for df in data.values()).date().isoformat()
     broker = make_alpaca_broker() if a.live else PaperBroker(a.equity)
-    decisions = run_cycle(data, broker, date,
-                          ledger=a.ledger if a.paper else None, live=a.live)
-    print(f"{date}  {'LIVE' if a.live else 'PAPER'}  equity={broker.equity():.2f}")
+    decisions = run_cycle(data, broker, date, ledger=a.ledger if a.paper else None,
+                          live=a.live, strategy=strategy, mode=mode)
+    print(f"{date}  {'LIVE' if a.live else 'PAPER'}  mode={mode}  equity={broker.equity():.2f}")
     for d in decisions:
         if d.side != "hold":
             print(f"  {d.side:<4} {d.symbol:<9} Δw={d.delta_weight:+.3f} "

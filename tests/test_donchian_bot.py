@@ -28,9 +28,18 @@ def _downtrend(n=60, start=100.0, slope=-0.01):
 
 
 def test_latest_signal_long_in_uptrend():
-    sig, price, a = bot.latest_signal(_uptrend())
+    sig, price, a, band = bot.latest_signal(_uptrend())
     assert sig == 1
-    assert price > 0 and a > 0
+    assert price > 0 and a > 0 and band > 0
+
+
+def test_units_for_trend_scales_with_progress_and_caps():
+    # at/just above the band -> 1 unit; deep in trend -> more, capped
+    assert bot.units_for_trend(price=100.0, band=100.0, atr_value=2.0, max_units=4) == 1
+    assert bot.units_for_trend(100.0, 99.0, 2.0, max_units=4) == 2   # 0.5 ATR -> 1+1
+    assert bot.units_for_trend(200.0, 100.0, 2.0, max_units=4) == 4  # capped
+    assert bot.units_for_trend(100.0, 100.0, 2.0, max_units=1) == 1  # pyramiding off
+    assert bot.units_for_trend(100.0, 100.0, float("nan"), max_units=3) == 3
 
 
 def test_target_book_only_includes_active_signals():
@@ -119,3 +128,34 @@ def test_run_cycle_live_skips_research_only_symbols():
     decisions = bot.run_cycle(data, broker, "2026-10-10", live=True)
     assert any(d.side == "buy" for d in decisions)      # it IS in the plan
     assert broker.placed == []                          # but no live order
+
+
+def test_ledger_records_mode():
+    with tempfile.TemporaryDirectory() as td:
+        path = os.path.join(td, "l.csv")
+        book = {"BTCUSDT": bot.Target("BTCUSDT", 1, 100.0, 2.0, 0.3)}
+        bot.append_ledger(path, "2026-10-10", 10_000, book, mode="enhanced")
+        df = pd.read_csv(path)
+        assert df.loc[0, "mode"] == "enhanced"
+        assert "mode" in bot.LEDGER_COLS
+
+
+def test_enhanced_config_defaults_are_the_validated_combo():
+    assert bot.ENHANCED == {"trend_filter": 100, "exit_mode": "midpoint",
+                            "pyramid_units": 2}
+    assert bot.BASE == {}
+
+
+def test_target_book_accepts_strategy_config():
+    data = {"BTCUSDT": _uptrend(n=160)}
+    base = bot.target_book(data, 10_000, strategy=bot.BASE)
+    enh = bot.target_book(data, 10_000, strategy=bot.ENHANCED)
+    # both should still size a long position; the strategy kw is threaded through
+    assert base["BTCUSDT"].signal == enh["BTCUSDT"].signal == 1
+    assert enh["BTCUSDT"].weight > 0
+
+
+def test_trend_filter_needs_enough_history():
+    # a 100-bar trend gate cannot fire on a 60-bar series -> stays flat
+    short = bot.target_book({"BTCUSDT": _uptrend(n=60)}, 10_000, strategy=bot.ENHANCED)
+    assert short == {}
