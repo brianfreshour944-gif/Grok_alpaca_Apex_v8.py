@@ -127,6 +127,65 @@ def backtest_xsec(close: pd.DataFrame, lookback: int, k: int, hold: int,
     }
 
 
+def backtest_xsec_longonly(close: pd.DataFrame, lookback: int, k: int, hold: int,
+                           fee_bps: float = 25.0, reverse: bool = False) -> dict:
+    """ALPACA-EXPRESSIBLE version: long-only tilt to the top-k relative winners.
+
+    Alpaca crypto cannot be shorted (spot only), so the dollar-neutral book
+    cannot be placed. This holds the k highest-momentum names equal-weight
+    (1/k each), cash otherwise, rebalanced every `hold` bars with turnover
+    costs. It inherits market beta -- compare it to equal-weight buy & hold."""
+    ret = close.pct_change()
+    mom = close / close.shift(lookback) - 1.0
+    if reverse:
+        mom = -mom
+    syms = close.columns
+    dates = close.index
+    n = len(dates)
+    w = pd.Series(0.0, index=syms)
+    equity = 1.0
+    eq = np.ones(n)
+    daily = np.zeros(n)
+    traded_total = 0.0
+    n_reb = 0
+    last_reb = None
+
+    for i in range(lookback, n - 1):
+        due = last_reb is None or (i - last_reb) >= hold
+        if due:
+            valid = mom.iloc[i].dropna()
+            target = pd.Series(0.0, index=syms)
+            if len(valid) >= k:
+                target[valid.sort_values().index[-k:]] = 1.0 / k
+            traded = float((target - w).abs().sum())
+            equity *= (1.0 - traded * fee_bps / 1e4)
+            traded_total += traded
+            n_reb += 1
+            w = target
+            last_reb = i
+        r = ret.iloc[i + 1].fillna(0.0)
+        port = float((w * r).sum())
+        equity *= (1.0 + port)
+        daily[i + 1] = port
+        eq[i + 1] = equity
+        w = w * (1.0 + r) / (1.0 + port) if (1.0 + port) != 0 else w
+
+    eq = eq[:n]
+    d = daily[lookback + 1:]
+    return {
+        "equity": pd.Series(eq, index=dates),
+        "daily": pd.Series(daily, index=dates),
+        "final_equity": float(eq[-1]),
+        "total_return": float(eq[-1] - 1.0),
+        "sharpe": _sharpe(d),
+        "tstat": _tstat(d),
+        "max_drawdown": _maxdd(eq),
+        "avg_turnover_per_day": traded_total / max(n - lookback - 1, 1),
+        "n_rebalances": n_reb,
+        "exposure": float((w != 0).mean()),
+    }
+
+
 def _sharpe(r: np.ndarray) -> float:
     r = r[np.isfinite(r)]
     if r.size < 2 or r.std(ddof=1) == 0:

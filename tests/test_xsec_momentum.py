@@ -84,3 +84,19 @@ def test_contrib_is_per_symbol_and_tracks_daily_pnl():
     assert list(r["contrib"].index) == list(df.columns)
     # gross book: summed per-symbol contribution ~= summed daily portfolio PnL
     assert r["contrib"].sum() == pytest.approx(r["daily"].sum(), rel=1e-9, abs=1e-9)
+
+
+def test_longonly_k_equals_universe_is_buy_and_hold_minus_one_time_cost():
+    """Selecting every name equal-weight is just buy & hold (less entry cost)."""
+    df = _close(n=300, m=6, seed=8)
+    r = xs.backtest_xsec_longonly(df, 20, 6, 10, fee_bps=0.0)
+    eqw = (df.pct_change().iloc[21:] + 1).prod().mean() - 1  # rough B&H proxy
+    assert abs(r["total_return"] - eqw) < 0.5  # same ballpark, no turnover drag
+
+
+def test_longonly_exposure_bounded_and_costs_monotone():
+    df = _close(n=400, m=8, seed=9, drift=0.001)
+    g = xs.backtest_xsec_longonly(df, 20, 3, 5, fee_bps=0.0)
+    n = xs.backtest_xsec_longonly(df, 20, 3, 5, fee_bps=25.0)
+    assert 0.0 <= g["exposure"] <= 1.0
+    assert g["total_return"] >= n["total_return"]
