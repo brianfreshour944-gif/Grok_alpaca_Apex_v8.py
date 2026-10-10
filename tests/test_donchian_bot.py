@@ -7,6 +7,7 @@ import tempfile
 
 import numpy as np
 import pandas as pd
+import pytest
 
 import donchian_bot as bot
 
@@ -207,3 +208,96 @@ def test_alpaca_broker_sizes_off_account_equity(monkeypatch):
     assert calls["equity"] == 1
     assert calls["buying_power"] == 0        # never consulted for sizing
     assert broker.positions() == {}
+
+
+# ── data sources ──────────────────────────────────────────────────────────────
+def _okx_rows(n, start_ms=1_600_000_000_000):
+    """n daily OKX history-candles rows: [ts, o, h, l, c, ...], oldest first."""
+    day = 86_400_000
+    return [[str(start_ms + i * day), "1", str(100 + i), str(90 + i), str(95 + i),
+             "1", "1", "1", "1"] for i in range(n)]
+
+
+def test_fetch_okx_daily_shapes_frame(monkeypatch):
+    pages = [_okx_rows(300, start_ms=1_600_000_000_000)]
+
+    def fake_http(url, headers=None):
+        after = None
+        if "after=" in url:
+            after = int(url.split("after=")[1].split("&")[0])
+        if after is None:
+            return {"data": pages[0]}
+        if after <= 1_600_000_000_000:
+            return {"data": []}
+        return {"data": pages[0]}
+
+    monkeypatch.setattr(bot, "_http_json", fake_http)
+    data = bot.fetch_okx_daily(["BTCUSDT"], days=250)
+    assert "BTCUSDT" in data
+    df = data["BTCUSDT"]
+    assert list(df.columns) == ["high", "low", "close"]
+    assert df.index.tz is not None and str(df.index.tz) == "UTC"
+    assert df.index.is_monotonic_increasing
+    assert len(df) <= 250
+
+
+def test_fetch_okx_daily_normalises_microsecond_timestamps(monkeypatch):
+    # second page uses microseconds (ts > 1e14) -- must be normalised, not dropped
+    ms = _okx_rows(300, start_ms=1_600_000_000_000)
+    us = [[str(int(r[0]) * 1000)] + r[1:] for r in _okx_rows(300, start_ms=1_700_000_000_000)]
+    calls = {"n": 0}
+
+    def fake_http(url, headers=None):
+        calls["n"] += 1
+        return {"data": ms if calls["n"] == 1 else us}
+
+    monkeypatch.setattr(bot, "_http_json", fake_http)
+    data = bot.fetch_okx_daily(["ETHUSDT"], days=500)
+    assert "ETHUSDT" in data
+    # both pages normalised -> index spans both eras, no year-55000 timestamps
+    assert data["ETHUSDT"].index.year.max() < 2100
+
+
+def test_fetch_alpaca_daily_uses_rest_fallback_and_real_shape(monkeypatch):
+    ts = pd.date_range("2024-01-01", periods=210, freq="D", tz="UTC")
+    rows = [{"t": d.isoformat(), "open": 1, "high": 110 + i,
+             "low": 90 + i, "close": 100 + i, "volume": 5} for i, d in enumerate(ts)]
+
+    def fake_bars(pair, start, key, secret):
+        return rows
+
+    monkeypatch.setattr(bot, "_alpaca_bars", fake_bars)
+    data = bot.fetch_alpaca_daily(["BTCUSDT"], days=400, key="k", secret="s")
+    assert "BTCUSDT" in data
+    assert list(data["BTCUSDT"].columns) == ["high", "low", "close"]
+    assert len(data["BTCUSDT"]) == 210
+
+
+def test_fetch_alpaca_daily_requires_keys(monkeypatch):
+    monkeypatch.delenv("APCA_API_KEY_ID", raising=False)
+    monkeypatch.delenv("APCA_API_SECRET_KEY", raising=False)
+    with pytest.raises(RuntimeError):
+        bot.fetch_alpaca_daily(["BTCUSDT"])
+
+
+def test_default_universe_is_alpaca_tradeable(monkeypatch):
+    monkeypatch.delenv("DONCHIAN_UNIVERSE", raising=False)
+    assert bot.default_universe() == sorted(bot.ALPACA_TRADEABLE)
+    monkeypatch.setenv("DONCHIAN_UNIVERSE", "BTCUSDT, ETHUSDT")
+    assert bot.default_universe() == ["BTCUSDT", "ETHUSDT"]
+
+
+def test_load_source_unknown_raises():
+    with pytest.raises(ValueError):
+        bot.load_source("nasdaq")
+
+
+def test_load_source_okx_falls_back_to_cache_on_fetch_error(monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("403 Forbidden")
+
+    sentinel = {"BTCUSDT": _uptrend()}
+    monkeypatch.setattr(bot, "fetch_okx_daily", boom)
+    import research.donchian_backtest as rdb
+    monkeypatch.setattr(rdb, "load_daily", lambda cache: sentinel)
+    assert bot.load_source("okx", cache="whatever") is sentinel

@@ -10,18 +10,31 @@
 #
 # Usage:
 #   python donchian_bot.py --paper  --ledger donchian_ledger.csv
+#   python donchian_bot.py --paper  --source alpaca      # Alpaca daily bars
 #   python donchian_bot.py --live --i-understand-the-risk
+#
+# Alpaca keys: this module never reads a key. The live broker imports
+# portfolio/orders, which use config's trading_client built from the env vars
+# APCA_API_KEY_ID / APCA_API_SECRET_KEY — the same keys as every other module.
 from __future__ import annotations
 
 import argparse
 import csv
+import json
+import logging
+import os
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
 import donchian_breakout as db
+
+_log = logging.getLogger("donchian_bot")
 
 # Operational defaults (frozen; see docs/DONCHIAN_BREAKOUT.md).
 MAX_POSITION_PCT = 0.20     # matches config.MAX_POSITION_PCT
@@ -55,6 +68,147 @@ def to_alpaca_symbol(sym: str) -> str | None:
 
 def from_alpaca_symbol(sym: str) -> str | None:
     return next((k for k, v in ALPACA_TRADEABLE.items() if v == sym), None)
+
+
+# ── data sources: OKX (research cache) or Alpaca (live decisions) ──────────────
+OKX_DAILY_URL = "https://www.okx.com/api/v5/market/history-candles"
+ALPACA_BARS_URL = "https://data.alpaca.markets/v1beta3/crypto/us/bars"
+ALPACA_KEYS = ("open", "high", "low", "close", "volume")
+
+
+def _http_json(url: str, headers: dict | None = None) -> dict:
+    req = urllib.request.Request(url, headers=headers or {})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return json.loads(r.read().decode())
+
+
+def fetch_okx_daily(symbols, days: int = 2200, inst_suffix: str = "-USDT") -> dict:
+    """Daily OHLCV from OKX's public history-candles endpoint (no auth).
+
+    `symbols` are research names (BTCUSDT); the OKX instId is BTC-USDT. Paginates
+    with `after` on the oldest open_time. Returns {symbol: DataFrame(high/low/close)}
+    indexed by UTC timestamp — the shape the backtest and the bot both expect.
+    """
+    out: dict[str, pd.DataFrame] = {}
+    for sym in symbols:
+        inst = sym.replace("USDT", inst_suffix) if inst_suffix else sym
+        rows, after = [], None
+        while True:
+            q = {"instId": inst, "bar": "1D", "limit": "300"}
+            if after:
+                q["after"] = str(after)
+            payload = _http_json(f"{OKX_DAILY_URL}?{urllib.parse.urlencode(q)}")
+            batch = payload.get("data", [])
+            if not batch:
+                break
+            rows.extend(batch)
+            after = batch[-1][0]                       # open_time (ms, newest last)
+            if len(rows) >= days + 5:
+                break
+        if not rows:
+            continue
+        recs = []
+        for r in rows:
+            ts = int(r[0])
+            if ts > 10**14:                            # OKX switched ms->us mid-history
+                ts //= 1000
+            recs.append((ts, float(r[2]), float(r[3]), float(r[4])))  # ts, high, low, close
+        df = pd.DataFrame(recs, columns=["ts", "high", "low", "close"])
+        df = df.assign(ts=pd.to_datetime(df["ts"], unit="ms", utc=True))
+        df = df.set_index("ts").sort_index()
+        df = df[~df.index.duplicated()].tail(days)
+        if len(df) > 200:
+            out[sym] = df
+    return out
+
+
+def _alpaca_bars(pair: str, start: str, key: str, secret: str) -> list:
+    """Prefer alpaca-py's client (shared keys); fall back to REST, paginating
+    with next_page_token."""
+    try:
+        from alpaca.data.historical import CryptoHistoricalDataClient
+        from alpaca.data.requests import CryptoBarsRequest
+        from alpaca.data.timeframe import TimeFrame
+        client = CryptoHistoricalDataClient(api_key=key, secret_key=secret)
+        bars = client.get_crypto_bars(CryptoBarsRequest(
+            symbol_or_symbols=pair, timeframe=TimeFrame.Day, start=start)).data.get(pair, [])
+        return [{"t": b.timestamp, "open": b.open, "high": b.high, "low": b.low,
+                 "close": b.close, "volume": b.volume} for b in bars]
+    except Exception as e:  # noqa: BLE001 — any alpaca-py import/call failure -> REST
+        _log.debug("alpaca-py bars unavailable, using REST: %s", e)
+    out, token = [], None
+    headers = {"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": secret}
+    while True:
+        q = {"symbols": pair, "timeframe": "1Day", "start": start, "limit": "1000"}
+        if token:
+            q["page_token"] = token
+        payload = _http_json(f"{ALPACA_BARS_URL}?{urllib.parse.urlencode(q)}", headers)
+        out.extend(payload.get("bars", {}).get(pair, []))
+        token = payload.get("next_page_token")
+        if not token:
+            break
+    return out
+
+
+def fetch_alpaca_daily(symbols, days: int = 2200, key: str | None = None,
+                       secret: str | None = None) -> dict:
+    """Daily OHLCV bars from Alpaca's crypto data API.
+
+    Tries alpaca-py first (same `CryptoHistoricalDataClient` config.py builds, so
+    the SAME keys are used), and falls back to the REST endpoint with an
+    APCA-API-KEY-ID/APCA-API-SECRET-KEY header. Returns {research_symbol: frame}.
+    Requires real keys; raises if none are configured.
+    """
+    key = key or os.getenv("APCA_API_KEY_ID")
+    secret = secret or os.getenv("APCA_API_SECRET_KEY")
+    if not key or not secret:
+        raise RuntimeError("Alpaca keys missing: set APCA_API_KEY_ID / APCA_API_SECRET_KEY")
+    start = (datetime.now(UTC) - timedelta(days=days)).strftime("%Y-%m-%dT00:00:00Z")
+    out: dict[str, pd.DataFrame] = {}
+    for sym in symbols:
+        pair = to_alpaca_symbol(sym) or sym
+        rows = _alpaca_bars(pair, start, key, secret)
+        if not rows:
+            continue
+        df = pd.DataFrame([{k: float(b.get(k) or 0) for k in ALPACA_KEYS} |
+                           {"ts": pd.Timestamp(b["t"])} for b in rows])
+        df = df.set_index("ts").sort_index()
+        df = df[~df.index.duplicated()].tail(days)[["high", "low", "close"]]
+        if len(df) > 200:
+            out[sym] = df
+    return out
+
+
+def default_universe() -> list[str]:
+    """Symbols with a live signal to evaluate: the Alpaca-tradeable set unless
+    DONCHIAN_UNIVERSE overrides it (comma-separated research names)."""
+    override = os.getenv("DONCHIAN_UNIVERSE")
+    if override:
+        return [s.strip() for s in override.split(",") if s.strip()]
+    return sorted(ALPACA_TRADEABLE)
+
+
+def load_source(source: str, cache: str = "okx_daily", days: int = 2200) -> dict:
+    """Load daily bars for the bot's universe from OKX (default) or Alpaca.
+
+    OKX is the default so the research stays reproducible; Alpaca is the honest
+    choice for live decisions because it is where orders actually settle. Both
+    return the same {symbol: DataFrame(high/low/close)} shape.
+    """
+    if source == "okx":
+        try:
+            data = fetch_okx_daily(default_universe(), days=days)
+        except Exception as e:  # noqa: BLE001 — fall back to cache on any fetch error
+            _log.warning("OKX daily fetch failed (%s); falling back to %s", e, cache)
+            data = {}
+        if data:
+            return data
+        # fall back to the on-disk research cache if the live fetch is unavailable
+        from research.donchian_backtest import load_daily
+        return load_daily(cache)
+    if source == "alpaca":
+        return fetch_alpaca_daily(default_universe(), days=days)
+    raise ValueError(f"unknown source {source!r} (use 'okx' or 'alpaca')")
 
 
 @dataclass
@@ -299,6 +453,11 @@ def run_cycle(data: dict[str, pd.DataFrame], broker, date: str,
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Daily Donchian breakout bot")
     ap.add_argument("--cache", default="okx_daily")
+    ap.add_argument("--source", choices=("okx", "alpaca"), default="okx",
+                    help="where decisions come from: okx (research, default) or "
+                         "alpaca (live bars — the venue you actually trade on)")
+    ap.add_argument("--days", type=int, default=2200,
+                    help="history depth to fetch for --source network loads")
     ap.add_argument("--paper", action="store_true", help="paper ledger; nothing traded")
     ap.add_argument("--live", action="store_true", help="submit real orders")
     ap.add_argument("--i-understand-the-risk", action="store_true", dest="ack")
@@ -315,10 +474,14 @@ def main(argv=None):
         print("nothing to do: pass --paper (default safe) or --live --i-understand-the-risk")
         return 2
 
-    from research.donchian_backtest import load_daily
-    data = load_daily(a.cache)
+    try:
+        data = load_source(a.source, cache=a.cache, days=a.days)
+    except Exception as e:  # noqa: BLE001 — surface any load failure as exit 1
+        print(f"failed to load {a.source} data: {e}")
+        return 1
     if not data:
-        print(f"no data in {a.cache}/ — run research/fetch_okx_daily.py first")
+        print(f"no data from source={a.source}"
+              + (f" (cache {a.cache}/ empty — run research/fetch_okx_daily.py)" if a.source == "okx" else ""))
         return 1
     strategy = BASE if a.base else ENHANCED
     mode = "base" if a.base else "enhanced"
@@ -326,7 +489,8 @@ def main(argv=None):
     broker = make_alpaca_broker() if a.live else PaperBroker(a.equity)
     decisions = run_cycle(data, broker, date, ledger=a.ledger if a.paper else None,
                           live=a.live, strategy=strategy, mode=mode)
-    print(f"{date}  {'LIVE' if a.live else 'PAPER'}  mode={mode}  equity={broker.equity():.2f}")
+    print(f"{date}  {'LIVE' if a.live else 'PAPER'}  source={a.source}  mode={mode}  "
+          f"equity={broker.equity():.2f}  symbols={len(data)}")
     for d in decisions:
         if d.side != "hold":
             print(f"  {d.side:<4} {d.symbol:<9} Δw={d.delta_weight:+.3f} "

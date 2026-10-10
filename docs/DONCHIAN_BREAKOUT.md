@@ -158,6 +158,12 @@ python research/donchian_improve.py --recent 2024-01-01 --walk-forward
 python donchian_bot.py --paper --ledger donchian_ledger.csv
 python donchian_bot.py --paper --base            # textbook rule instead
 
+# decisions from ALPACA's own daily bars (same keys as every other module) —
+# the venue you actually trade on. --source okx (default) keeps research numbers
+# reproducible and falls back to the on-disk cache if the network is blocked.
+python donchian_bot.py --paper --source alpaca
+python donchian_bot.py --paper --source okx --days 400
+
 # live is DOUBLE-GATED: --live alone is refused
 python donchian_bot.py --live --i-understand-the-risk
 ```
