@@ -170,8 +170,11 @@ python donchian_bot.py --live --i-understand-the-risk
 
 Live trading maps OKX symbols to Alpaca pairs (`BTCUSDT → BTC/USD`) and only
 orders symbols Alpaca actually lists (`ALPACA_TRADEABLE`); research-only symbols
-appear in the ledger but are never ordered. Market orders are used for exits,
-matching the repo's protective-exit convention.
+appear in the ledger but are never ordered. All orders are **market** orders
+(entries and exits), matching the backtest's fill assumption. Orders whose
+notional falls below Alpaca's crypto minimum (`MIN_ORDER_NOTIONAL`, default $1,
+override with `DONCHIAN_MIN_NOTIONAL`) are skipped locally rather than sent to
+be rejected. Sizing uses the account's **equity**, not buying power.
 
 Cron (paper only), 01:30 UTC:
 ```

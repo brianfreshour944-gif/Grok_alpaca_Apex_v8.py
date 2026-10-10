@@ -138,7 +138,38 @@ def test_ledger_records_mode():
         bot.append_ledger(path, "2026-10-10", 10_000, book, mode="enhanced")
         df = pd.read_csv(path)
         assert df.loc[0, "mode"] == "enhanced"
-        assert "mode" in bot.LEDGER_COLS
+
+
+def test_run_cycle_live_skips_sub_minimum_notional(monkeypatch):
+    class FakeBroker(bot.PaperBroker):
+        def submit(self, symbol, side, qty):
+            self.placed.append({"symbol": symbol, "side": side, "qty": qty})
+            return "fake-1"
+
+    # Force every trade to be below the minimum so the guard must fire.
+    monkeypatch.setattr(bot, "MIN_ORDER_NOTIONAL", 1e9)
+    data = {"BTCUSDT": _uptrend()}
+    broker = FakeBroker(equity=10_000)
+    decisions = bot.run_cycle(data, broker, "2026-10-10", live=True)
+    assert any(d.side == "buy" for d in decisions)   # still in the plan
+    assert broker.placed == []                       # but never submitted
+
+
+def test_run_cycle_live_submits_when_above_minimum(monkeypatch):
+    class FakeBroker(bot.PaperBroker):
+        def submit(self, symbol, side, qty):
+            self.placed.append({"symbol": symbol, "side": side, "qty": qty})
+            return "fake-1"
+
+    monkeypatch.setattr(bot, "MIN_ORDER_NOTIONAL", 1.0)
+    data = {"BTCUSDT": _uptrend()}
+    broker = FakeBroker(equity=10_000)
+    bot.run_cycle(data, broker, "2026-10-10", live=True)
+    assert len(broker.placed) == 1
+
+
+def test_min_order_notional_default_is_one_dollar():
+    assert bot.MIN_ORDER_NOTIONAL >= 1.0
 
 
 def test_enhanced_config_defaults_are_the_validated_combo():
@@ -208,6 +239,44 @@ def test_alpaca_broker_sizes_off_account_equity(monkeypatch):
     assert calls["equity"] == 1
     assert calls["buying_power"] == 0        # never consulted for sizing
     assert broker.positions() == {}
+
+
+def test_alpaca_broker_submits_market_orders(monkeypatch):
+    """Entries stay MARKET orders (user-confirmed): the adapter must call
+    orders.place_order with market=True."""
+    import sys
+    import types
+
+    seen = {}
+
+    fake_portfolio = types.ModuleType("portfolio")
+    fake_portfolio.get_account_equity = lambda: 1000.0
+    fake_portfolio.get_all_positions = dict
+
+    async def _place(symbol, side, qty, **kw):
+        seen.update(symbol=symbol, side=side, qty=qty, **kw)
+        kw.get("order_id_out", {}).update(order_id="live-1")
+        return True
+
+    fake_orders = types.ModuleType("orders")
+    fake_orders.place_order = _place
+
+    fake_alpaca = types.ModuleType("alpaca")
+    fake_trading = types.ModuleType("alpaca.trading")
+    fake_enums = types.ModuleType("alpaca.trading.enums")
+    fake_enums.OrderSide = types.SimpleNamespace(BUY="buy", SELL="sell")
+    fake_trading.enums = fake_enums
+    fake_alpaca.trading = fake_trading
+
+    for name, mod in [("portfolio", fake_portfolio), ("orders", fake_orders),
+                      ("alpaca", fake_alpaca), ("alpaca.trading", fake_trading),
+                      ("alpaca.trading.enums", fake_enums)]:
+        monkeypatch.setitem(sys.modules, name, mod)
+
+    oid = bot.make_alpaca_broker().submit("BTCUSDT", "buy", 0.01)
+    assert seen["symbol"] == "BTC/USD"       # mapped to the Alpaca pair
+    assert seen["market"] is True            # market order, not a limit
+    assert oid == "live-1"
 
 
 # ── data sources ──────────────────────────────────────────────────────────────

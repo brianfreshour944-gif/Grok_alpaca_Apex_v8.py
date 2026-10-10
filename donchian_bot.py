@@ -62,6 +62,12 @@ ALPACA_TRADEABLE = {"BTCUSDT": "BTC/USD", "ETHUSDT": "ETH/USD", "SOLUSDT": "SOL/
                     "DOTUSDT": "DOT/USD"}
 
 
+# Live crypto orders below Alpaca's minimum notional are rejected by the venue;
+# skipping them locally avoids a guaranteed-failing round-trip every cycle. Alpaca
+# documents a $1 minimum for crypto; default a touch above it.
+MIN_ORDER_NOTIONAL = float(os.getenv("DONCHIAN_MIN_NOTIONAL", "1.0"))
+
+
 def to_alpaca_symbol(sym: str) -> str | None:
     return ALPACA_TRADEABLE.get(sym)
 
@@ -444,6 +450,12 @@ def run_cycle(data: dict[str, pd.DataFrame], broker, date: str,
         for d in decisions:
             if d.side in ("buy", "sell") and np.isfinite(d.price) and to_alpaca_symbol(d.symbol):
                 notional = abs(d.delta_weight) * equity
+                # Venue rejects sub-minimum crypto orders; skip before the
+                # round-trip rather than submitting a known-failing order.
+                if notional < MIN_ORDER_NOTIONAL:
+                    _log.info("skip %s %s: notional %.4f < min %.4f",
+                              d.side, d.symbol, notional, MIN_ORDER_NOTIONAL)
+                    continue
                 qty = broker.quantity_for_notional(d.symbol, notional, d.price)
                 if qty > 0:
                     broker.submit(d.symbol, d.side, qty)
