@@ -24,5 +24,13 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements-dev.txt
 
+      # Same keyless scope as the live cron: the Donchian strategy, its
+      # operational shell, the paper-forward ledger, and the signal research.
+      # The Grok Apex ML/dense-suite is NOT run (that bot is disabled).
       - name: Run tests
-        run: pytest tests/ -v
+        run: >
+          pytest -v
+          tests/test_donchian_breakout.py
+          tests/test_donchian_bot.py
+          tests/test_donchian_forward.py
+          tests/test_xsec_momentum.py

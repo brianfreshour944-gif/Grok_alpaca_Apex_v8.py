@@ -1,0 +1,24 @@
+# Live-image variant: same code, but the container runs the Donchian LIVE
+# entrypoint (REAL ORDERS). Build this only for the account you intend to trade.
+#
+#   docker build -f Dockerfile.live -t donchian-live .
+#   docker run --env-file .env -e DONCHIAN_I_UNDERSTAND_THE_RISK=true donchian-live
+#
+# The live default is Alpaca's PAPER account unless APCA_API_PAPER=false.
+FROM python:3.11-slim
+
+ENV DEBIAN_FRONTEND=noninteractive
+WORKDIR /app
+
+RUN adduser --disabled-password --gecos '' botuser
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+RUN chown -R botuser:botuser /app
+USER botuser
+
+# Scratch dir the non-root user can write the live ledger into.
+ENV DONCHIAN_LEDGER=/tmp/donchian_ledger.csv
+CMD ["bash", "donchian_live_daily.sh"]

@@ -9,6 +9,7 @@ from portfolio import (
     normalize_symbol, denormalize_symbol, calculate_kelly_multiplier,
     sell_largest_position, swap_weakest_position, sync_existing_positions,
     _portfolio_state, has_pending_exit, mark_pending_exit,
+    get_buying_power, get_account_equity,
 )
 from conftest import run_async
 
@@ -279,3 +280,21 @@ def test_sync_existing_positions_cleans_up_closed_positions(mock_trading_client)
     assert "ETH/USD" not in entry_time
     assert "ETH/USD" not in highest_prices
     assert entry_time["BTC/USD"] == 123.0  # untouched, was already tracked
+
+
+# ── account equity vs buying power (position sizing base) ─────────────────────
+def test_get_account_equity_reads_equity_not_buying_power(mock_trading_client):
+    mock_trading_client.get_account.return_value = MagicMock(
+        equity="12345.67", buying_power="0.0")
+    assert get_account_equity() == pytest.approx(12345.67)
+
+
+def test_get_account_equity_zero_on_failure(mock_trading_client):
+    mock_trading_client.get_account.side_effect = RuntimeError("network error")
+    assert get_account_equity() == 0.0
+
+
+def test_get_buying_power_reads_buying_power(mock_trading_client):
+    mock_trading_client.get_account.return_value = MagicMock(
+        equity="12345.67", buying_power="20000.0")
+    assert get_buying_power() == pytest.approx(20000.0)
