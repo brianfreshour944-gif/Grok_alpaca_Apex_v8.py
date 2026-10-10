@@ -42,11 +42,14 @@ def load_daily(cache: str) -> dict[str, pd.DataFrame]:
     return out
 
 
-def run_symbols(data: dict[str, pd.DataFrame], **kw) -> dict:
-    """Run the backtest per symbol; return per-symbol summaries + a basket."""
+def run_symbols(data: dict[str, pd.DataFrame], regime: dict | None = None, **kw) -> dict:
+    """Run the backtest per symbol; return per-symbol summaries + a basket.
+
+    `regime` (optional): {symbol: bool ndarray} entry gate per symbol, aligned
+    to that symbol's frames. Symbols absent from it are ungated."""
     per, curves, trades = {}, {}, {}
     for sym, df in data.items():
-        r = db.backtest_donchian(df, **kw)
+        r = db.backtest_donchian(df, regime=None if regime is None else regime.get(sym), **kw)
         per[sym] = {k: r[k] for k in
                     ("total_return", "cagr", "sharpe", "max_drawdown",
                      "n_trades", "win_rate", "profit_factor", "exposure",

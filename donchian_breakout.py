@@ -84,7 +84,8 @@ def trend_mask(close, window: int) -> np.ndarray:
 def breakout_signal(high, low, close, entry: int = DEFAULT_ENTRY,
                     exit: int = DEFAULT_EXIT, allow_short: bool = False,
                     trend_filter: int = DEFAULT_TREND_FILTER,
-                    exit_mode: str = DEFAULT_EXIT_MODE) -> np.ndarray:
+                    exit_mode: str = DEFAULT_EXIT_MODE,
+                    gate: np.ndarray | None = None) -> np.ndarray:
     """Stateful Donchian position in {-1, 0, +1} per bar.
 
     Long entry when close > upper(entry); long exit when close crosses the exit
@@ -99,6 +100,9 @@ def breakout_signal(high, low, close, entry: int = DEFAULT_ENTRY,
     `exit_mode`: "band" exits when close crosses the opposite `exit` band (the
     textbook rule); "midpoint" exits when close crosses that band's MIDPOINT,
     which books profit sooner and reduces give-back on failed breakouts.
+
+    `gate` (optional bool array): an extra regime mask ANDed with the trend
+    filter for entry. None/all-True leaves the rules untouched.
     """
     c = np.asarray(close, dtype=float)
     up_e, lo_e = donchian_channel(high, low, entry)
@@ -110,6 +114,9 @@ def breakout_signal(high, low, close, entry: int = DEFAULT_ENTRY,
         exit_long, exit_short = lo_x, up_x
     ok = trend_mask(c, trend_filter)
     gated = trend_filter > 0                       # only gate entries when on
+    if gate is not None:
+        ok = ok & np.asarray(gate, dtype=bool)
+        gated = True
     state = np.zeros(len(c), dtype=np.int8)
     pos = 0
     for i in range(len(c)):
@@ -159,7 +166,8 @@ def backtest_donchian(df: pd.DataFrame, entry: int = DEFAULT_ENTRY, exit: int = 
                       exit_mode: str = DEFAULT_EXIT_MODE,
                       pyramid_units: int = DEFAULT_PYRAMID_UNITS,
                       pyramid_atr: float = DEFAULT_PYRAMID_ATR,
-                      trail_atr: float = DEFAULT_TRAIL_ATR) -> dict:
+                      trail_atr: float = DEFAULT_TRAIL_ATR,
+                      regime: np.ndarray | None = None) -> dict:
     """Single-asset Donchian backtest with realistic per-side fees and a stop.
 
     `df` needs columns high/low/close. Decisions are made at each bar's CLOSE
@@ -175,7 +183,9 @@ def backtest_donchian(df: pd.DataFrame, entry: int = DEFAULT_ENTRY, exit: int = 
       * `exit_mode="midpoint"` — exit on the exit band's midpoint;
       * `pyramid_units`/`pyramid_atr` — add units as the trade moves in favour
         (Turtle add-units), so winners get a bigger position;
-      * `trail_atr` — ratchet the stop behind the running extreme.
+      * `trail_atr` — ratchet the stop behind the running extreme;
+      * `regime` — optional bool array; when supplied, entries are also gated on
+        it being True at that bar (all-True/None leaves the rules unchanged).
 
     Equity is the single source of truth: a trade's PnL is the equity change
     between opening and closing, so fees and marks can never drift out of sync.
@@ -194,7 +204,7 @@ def backtest_donchian(df: pd.DataFrame, entry: int = DEFAULT_ENTRY, exit: int = 
         raise ValueError("not enough bars for the requested windows")
 
     sig = breakout_signal(hi, lo, o, entry, exit, allow_short,
-                          trend_filter=trend_filter, exit_mode=exit_mode)
+                          trend_filter=trend_filter, exit_mode=exit_mode, gate=regime)
     a = atr(hi, lo, o, atr_window)
     cost = fee_bps / 1e4
 

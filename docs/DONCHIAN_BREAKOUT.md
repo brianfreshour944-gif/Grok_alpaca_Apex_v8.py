@@ -135,6 +135,53 @@ Note the enhanced config gives up some *absolute* full-sample return but roughly
 the honest trade: better risk-adjusted, not a higher peak. Four folds on one
 crypto regime is suggestive, not conclusive — paper-trade it.
 
+## Does anything rescue the post-2024 decay? (decay study)
+
+The per-year read showed the edge working through 2024 then going flat in
+2025–2026. `research/donchian_decay.py` tests the obvious fixes against exactly
+that problem: a **shorter trend filter** (faster adaptation) and a **market
+regime gate** (only take breakouts while the whole equal-weight basket is above
+its own N-day average). The gate is a new opt-in `regime=` argument on
+`backtest_donchian` (all-True is a no-op; a test pins that).
+
+Per-year basket total % (taker 25 bps):
+
+| lever | 2021 | 2022 | 2023 | 2024 | 2025 | 2026 |
+|---|---|---|---|---|---|---|
+| base | +16.1 | −8.4 | +7.0 | +13.3 | +0.2 | −1.1 |
+| trend50 | +9.1 | −7.2 | +10.7 | +7.8 | +0.5 | −0.5 |
+| trend100 | +1.8 | −3.8 | +8.5 | +9.6 | +0.5 | −1.6 |
+| trend200 | +1.1 | −2.7 | +11.0 | +9.7 | −4.9 | −0.1 |
+| mktgate200 | +1.2 | 0.0 | +13.6 | +10.0 | −4.7 | −1.2 |
+| mktgate200+mid | +1.4 | 0.0 | +3.9 | +9.2 | −3.5 | +0.1 |
+
+Out-of-sample (leave-one-fold-out deltas vs base, %):
+
+| lever | F1 | F2 | F3 | F4 | mean | folds won |
+|---|---|---|---|---|---|---|
+| trend50 | +3.0 | +4.1 | +2.3 | +0.1 | +2.4 | 4/4 |
+| trend100 | +5.0 | +2.3 | +3.3 | +4.1 | +3.7 | 4/4 |
+| trend200 | +9.1 | +4.8 | +4.8 | +7.1 | +6.5 | 4/4 |
+| mktgate100 | +5.3 | +1.4 | +4.2 | +4.8 | +3.9 | 4/4 |
+| mktgate200 | +11.9 | +7.5 | +5.1 | +5.6 | +7.5 | 4/4 |
+| mktgate200+mid | +11.9 | −2.0 | +3.8 | +6.9 | +5.1 | 3/4 |
+
+Honest read:
+
+- **No lever rescues 2025–2026 — they are flat or negative for all of them.**
+  The decay is a *regime* effect, not a parameter that can be re-tuned away.
+- The gates win 4/4 OOS folds because they help most in the **down/bear folds**
+  (2022 f1, 2025 f4) by sitting out — that is drawdown control, not a return
+  engine.
+- The market gate is the best of the set (+7.5 mean, 4/4) but it is *slower*, so
+  it gives up a lot of the bull-year upside (2021 +1.2 vs base +16.1).
+- `mktgate200+mid` is the best risk-adjusted recent config (RECENT Sharpe 0.62
+  vs base 0.38, maxDD −5.9% vs −11.7%) but fails 2025 (−3.5%).
+
+**None of these is promoted.** They are recorded as research: the honest
+conclusion is that the recent decay is regime-driven and the right response is
+to size small and paper-trade, not to curve-fit a gate onto it.
+
 ## Verdict
 
 A Donchian breakout is a **legitimate, positive-expectancy, regime-robust
@@ -153,6 +200,7 @@ python research/fetch_okx_daily.py --days 2200
 # honest study (base) and the improvement study (enhancements)
 python research/donchian_backtest.py --recent 2024-01-01 --sweep --walk-forward
 python research/donchian_improve.py --recent 2024-01-01 --walk-forward
+python research/donchian_decay.py --recent 2024-01-01   # post-2024 decay levers
 
 # paper ledger (nothing traded); idempotent by date. Defaults to ENHANCED.
 python donchian_bot.py --paper --ledger donchian_ledger.csv

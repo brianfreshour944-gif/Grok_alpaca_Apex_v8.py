@@ -172,6 +172,35 @@ def test_trend_filter_blocks_countertrend_entries():
     assert not (gated == 1).any()
 
 
+def test_regime_gate_all_true_is_a_noop():
+    """A supplied but always-True gate must leave the base rules untouched."""
+    df = _trending(n=300, slope=0.01, noise=0.02, seed=7)
+    r = db.backtest_donchian(df)
+    g = np.ones(len(df), dtype=bool)
+    rg = db.backtest_donchian(df, regime=g)
+    assert rg["final_equity"] == pytest.approx(r["final_equity"], rel=1e-12)
+    assert rg["n_trades"] == r["n_trades"]
+
+
+def test_regime_gate_all_false_blocks_all_entries():
+    df = _trending(n=300, slope=0.01, noise=0.02, seed=7)
+    rg = db.backtest_donchian(df, regime=np.zeros(len(df), dtype=bool))
+    assert rg["n_trades"] == 0
+    assert rg["exposure"] == 0.0
+    assert rg["final_equity"] == pytest.approx(10_000.0, rel=1e-12)
+
+
+def test_regime_gate_can_only_remove_entries_not_add():
+    """ANDing a gate with the trend filter can only suppress long entries."""
+    df = _trending(n=300, slope=0.02, noise=0.03, seed=4)
+    sig = db.breakout_signal(df["high"], df["low"], df["close"], entry=10, exit=5)
+    # a periodic gate blocks the back half of the sample
+    g = np.arange(len(df)) % 2 == 0
+    gated = db.breakout_signal(df["high"], df["low"], df["close"], entry=10,
+                               exit=5, gate=g)
+    assert (gated == 1).sum() <= (sig == 1).sum()
+
+
 def test_trend_mask_is_causal_and_signed():
     c = np.array([1.0, 2, 3, 4, 5, 4, 3, 2, 1])
     m = db.trend_mask(c, 3)
