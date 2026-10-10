@@ -208,8 +208,8 @@ python research/donchian_decay.py --recent 2024-01-01   # post-2024 decay levers
 python donchian_bot.py --paper --ledger donchian_ledger.csv
 python donchian_bot.py --paper --base            # textbook rule instead
 
-# decisions from ALPACA's own daily bars (same keys as every other module) —
-# the venue you actually trade on. This is what the deployed paper run uses.
+# decisions from ALPACA's own daily bars — public feed, NO keys needed (the
+# venue you actually trade on). This is what the deployed paper run uses.
 # --save-cache persists the bars so the forward report marks on the same prices.
 python donchian_bot.py --paper --source alpaca --save-cache alpaca_daily
 python donchian_bot.py --paper --source okx --days 400   # research cache fallback

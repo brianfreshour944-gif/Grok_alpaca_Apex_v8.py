@@ -130,27 +130,38 @@ def fetch_okx_daily(symbols, days: int = 2200, inst_suffix: str = "-USDT") -> di
     return out
 
 
-def _alpaca_bars(pair: str, start: str, key: str, secret: str) -> list:
-    """Prefer alpaca-py's client (shared keys); fall back to REST, paginating
-    with next_page_token."""
+def _alpaca_py_bars(pair: str, start: str) -> list:
+    """Bars via alpaca-py's KEYLESS client (crypto data is public). Raises on
+    any import/call failure so the caller can fall back to REST."""
+    from alpaca.data.historical import CryptoHistoricalDataClient
+    from alpaca.data.requests import CryptoBarsRequest
+    from alpaca.data.timeframe import TimeFrame
+    client = CryptoHistoricalDataClient()              # no keys, matching config.py
+    bars = client.get_crypto_bars(CryptoBarsRequest(
+        symbol_or_symbols=pair, timeframe=TimeFrame.Day, start=start)).data.get(pair, [])
+    return [{"t": b.timestamp, "open": b.open, "high": b.high, "low": b.low,
+             "close": b.close, "volume": b.volume} for b in bars]
+
+
+def _alpaca_bars(pair: str, start: str, key: str | None, secret: str | None) -> list:
+    """Daily bars for `pair` from Alpaca's crypto data API.
+
+    Alpaca serves crypto market data WITHOUT credentials — the original bot's
+    `CryptoHistoricalDataClient()` was built with no keys for exactly this reason.
+    We match that: a keyless client first, then an anonymous REST call. Sending a
+    key to this endpoint gets it REJECTED (HTTP 401) when it is a trading key or
+    otherwise not data-authorized, which would break a public feed for no reason.
+    """
     try:
-        from alpaca.data.historical import CryptoHistoricalDataClient
-        from alpaca.data.requests import CryptoBarsRequest
-        from alpaca.data.timeframe import TimeFrame
-        client = CryptoHistoricalDataClient(api_key=key, secret_key=secret)
-        bars = client.get_crypto_bars(CryptoBarsRequest(
-            symbol_or_symbols=pair, timeframe=TimeFrame.Day, start=start)).data.get(pair, [])
-        return [{"t": b.timestamp, "open": b.open, "high": b.high, "low": b.low,
-                 "close": b.close, "volume": b.volume} for b in bars]
+        return _alpaca_py_bars(pair, start)
     except Exception as e:  # noqa: BLE001 — any alpaca-py import/call failure -> REST
         _log.debug("alpaca-py bars unavailable, using REST: %s", e)
     out, token = [], None
-    headers = {"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": secret}
     while True:
         q = {"symbols": pair, "timeframe": "1Day", "start": start, "limit": "1000"}
         if token:
             q["page_token"] = token
-        payload = _http_json(f"{ALPACA_BARS_URL}?{urllib.parse.urlencode(q)}", headers)
+        payload = _http_json(f"{ALPACA_BARS_URL}?{urllib.parse.urlencode(q)}")
         out.extend(payload.get("bars", {}).get(pair, []))
         token = payload.get("next_page_token")
         if not token:
@@ -160,17 +171,13 @@ def _alpaca_bars(pair: str, start: str, key: str, secret: str) -> list:
 
 def fetch_alpaca_daily(symbols, days: int = 2200, key: str | None = None,
                        secret: str | None = None) -> dict:
-    """Daily OHLCV bars from Alpaca's crypto data API.
+    """Daily OHLCV bars from Alpaca's crypto data API — public, no keys required.
 
-    Tries alpaca-py first (same `CryptoHistoricalDataClient` config.py builds, so
-    the SAME keys are used), and falls back to the REST endpoint with an
-    APCA-API-KEY-ID/APCA-API-SECRET-KEY header. Returns {research_symbol: frame}.
-    Requires real keys; raises if none are configured.
+    `key`/`secret` are accepted for parity with config's trading credentials but
+    are not needed here: Alpaca serves crypto market data unauthenticated, so
+    passing a trading key is what produced a spurious HTTP 401. Returns
+    {research_symbol: frame}.
     """
-    key = key or os.getenv("APCA_API_KEY_ID")
-    secret = secret or os.getenv("APCA_API_SECRET_KEY")
-    if not key or not secret:
-        raise RuntimeError("Alpaca keys missing: set APCA_API_KEY_ID / APCA_API_SECRET_KEY")
     start = (datetime.now(UTC) - timedelta(days=days)).strftime("%Y-%m-%dT00:00:00Z")
     out: dict[str, pd.DataFrame] = {}
     for sym in symbols:

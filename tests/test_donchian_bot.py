@@ -342,11 +342,31 @@ def test_fetch_alpaca_daily_uses_rest_fallback_and_real_shape(monkeypatch):
     assert len(data["BTCUSDT"]) == 210
 
 
-def test_fetch_alpaca_daily_requires_keys(monkeypatch):
+def test_alpaca_bars_never_send_credentials(monkeypatch):
+    """Alpaca crypto data is public; a key here gets REJECTED (401). The client
+    must be keyless (matching the original bot's CryptoHistoricalDataClient())."""
+    captured = {}
+
+    def fake_http(url, headers=None, timeout=30):
+        captured["headers"] = headers or {}
+        return {"bars": {"BTC/USD": [{"t": "2024-01-01T00:00:00Z",
+                "o": 1, "h": 1, "l": 1, "c": 1, "v": 1}]}, "next_page_token": None}
+
+    # Force the REST path and assert no APCA-* headers are sent.
+    monkeypatch.setattr(bot, "_http_json", fake_http)
+    monkeypatch.setattr(bot, "_alpaca_py_bars", lambda *a, **k: (_ for _ in ()).throw(
+        RuntimeError("no alpaca-py")))
+    rows = bot._alpaca_bars("BTC/USD", "2024-01-01T00:00:00Z", "akey", "asecret")
+    assert rows and len(rows) == 1
+    assert not any(h.upper().startswith("APCA-") for h in captured["headers"])
+
+
+def test_fetch_alpaca_daily_needs_no_keys(monkeypatch):
+    """No keys configured is fine — crypto market data is public."""
     monkeypatch.delenv("APCA_API_KEY_ID", raising=False)
     monkeypatch.delenv("APCA_API_SECRET_KEY", raising=False)
-    with pytest.raises(RuntimeError):
-        bot.fetch_alpaca_daily(["BTCUSDT"])
+    monkeypatch.setattr(bot, "_alpaca_bars", lambda pair, start, k, s: [])
+    assert bot.fetch_alpaca_daily(["BTCUSDT"]) == {}
 
 
 def test_default_universe_is_alpaca_tradeable(monkeypatch):
