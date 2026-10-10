@@ -36,17 +36,23 @@ two reasons:
 - Alpaca bars are the venue where orders actually settle, so the paper book
   matches what live would do.
 
+**No keys are needed for the data.** Alpaca serves crypto market data publicly —
+the original bot's `CryptoHistoricalDataClient()` was built with no keys for
+exactly this reason. The Donchian bot matches that: a **keyless** client, then an
+anonymous REST call. Passing a key to that endpoint gets it rejected
+(`HTTP 401`), so the bot deliberately does not send one. Your `APCA_*` keys are
+used only for **trading** (live orders), never for bars.
+
 The fetched bars are saved to a close cache (`DONCHIAN_CACHE`, default
 `alpaca_daily/`) so the forward report marks the ledger on the **same prices**.
-If the keys are missing the bot degrades to the OKX cache, **trimmed to the
-Alpaca-tradeable symbols** so the paper book never contains a leg live could not
-place, and the banner prints which source it actually used.
+If Alpaca is unreachable the bot degrades to the OKX cache, **trimmed to the
+Alpaca-tradeable symbols**, and prints which source it actually used.
 
 ## Three ways to run it
 
 **1. Paper ledger (default, nothing traded).** This is what the image runs.
-Uses your `APCA_*` keys for Alpaca bars; without them it degrades to the OKX
-cache (10 tradeable symbols) and says so:
+Reads Alpaca bars from the public feed — no keys needed. If Alpaca is
+unreachable it degrades to the OKX cache (10 tradeable symbols) and says so:
 ```bash
 docker run --rm <image>
 # == bash donchian_paper_daily.sh
@@ -86,6 +92,21 @@ From `docs/DONCHIAN_BREAKOUT.md` and the forward ledger:
 
 Paper-trade first. Do not put real money behind it on these numbers.
 
+## If it exits or restarts in a tight loop
+
+The entrypoint loops (run + idle) so one container covers many days. If the
+platform logs a run every few seconds instead, either `DONCHIAN_ONESHOT=1` is set
+(use cron) or the loop is being killed. With no venue data and no cache the bot
+prints a message and moves on rather than exiting non-zero.
+
+## `HTTP 401 Unauthorized` from Alpaca
+
+Crypto bars are public and need no credentials, so the bot does not send any. A
+401 means *something is sending a key that Alpaca rejects* — usually a
+`data.alpaca.markets` request made with `APCA-*` headers. Check that no wrapper
+script or older image is injecting credentials into the data call. (Historically
+this bit us: the bot used to send the trading key to the data endpoint.)
+
 ## Rollback (how to go back to Grok Apex)
 
 One line — restore the original container command:
@@ -97,6 +118,10 @@ sed -i 's|CMD \["bash", "donchian_paper_daily.sh"\]|CMD ["python", "main_bot.py"
 Then rebuild/redeploy. Nothing else needs undoing: the Apex code, model, and
 config were never removed, and the env vars it reads are all still in
 `.env.example`.
+
+By default the container loops: run, then idle `DONCHIAN_IDLE_SLEEP` (default
+3600s), repeat — so one container produces the daily rows. Set
+`DONCHIAN_ONESHOT=1` to run once and exit (cron/one-shot).
 
 ## Scheduling (optional)
 
