@@ -1,7 +1,9 @@
 # Donchian-channel breakout — build notes and honest results
 
-Branch: `feat/donchian-breakout` (off `main`). Additive — no change to
-`config.py`, `main_bot.py`, or the transformer pipeline.
+Branch: `feat/donchian-breakout` (off `main`). Additive — the strategy engine,
+`donchian_bot.py`, never imports `config.py`/`main_bot.py`. The Grok Apex
+CNN/GBDT bot is retained but **disabled**: the container entrypoint now runs
+this bot (see `docs/SWITCHING_TO_DONCHIAN.md`).
 
 ## What was built
 

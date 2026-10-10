@@ -19,5 +19,8 @@ COPY . .
 RUN chown -R botuser:botuser /app
 USER botuser
 
-# Run your application
-CMD ["python", "main_bot.py"]
+# Run your application: the Donchian breakout bot (PAPER ledger, nothing traded)
+# by default. The Grok Apex CNN/GBDT bot (main_bot.py) is retained but disabled.
+# For the live capstones, set DONCHIAN_LIVE=true and
+# DONCHIAN_I_UNDERSTAND_THE_RISK=true (real orders), or build Dockerfile.live.
+CMD ["bash", "donchian_paper_daily.sh"]
