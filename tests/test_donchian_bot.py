@@ -451,3 +451,34 @@ def test_main_no_data_exits_zero(monkeypatch, tmp_path):
     monkeypatch.setattr(rdb, "load_daily", lambda cache: {})
     assert bot.main(["--paper", "--source", "alpaca",
                      "--ledger", str(tmp_path / "l.csv")]) == 0
+
+
+def test_run_cycle_live_places_the_exit_when_a_position_leaves_the_target():
+    """A held symbol that leaves the target book must be SOLD live.
+
+    plan_rebalance emits the exit as side="sell" with price=NaN (there is no
+    Target for a dropped symbol), so the live path's finite-price guard skipped
+    every exit. In a long-only book that means a position is opened and then
+    NEVER closed - the single most expensive bug for a trend rule. This pins the
+    real run_cycle path (not just plan_rebalance).
+    """
+    class FakeBroker(bot.PaperBroker):
+        def __init__(self, positions):
+            super().__init__(equity=10_000)
+            self._pos = positions
+
+        def positions(self):
+            return dict(self._pos)
+
+        def submit(self, symbol, side, qty):
+            self.placed.append({"symbol": symbol, "side": side, "qty": qty})
+            return "fake-1"
+
+    # BTC is still in the data (so it has a price) but its signal has gone flat,
+    # so the target book is empty and the held leg must be closed out.
+    broker = FakeBroker({"BTCUSDT": 60.0})   # ~0.3 of equity at the downtrend close
+    decisions = bot.run_cycle({"BTCUSDT": _downtrend()}, broker, "2026-10-10", live=True)
+    assert any(d.side == "sell" for d in decisions)          # it IS in the plan
+    assert len(broker.placed) == 1                           # and the order went out
+    assert broker.placed[0]["side"] == "sell"
+    assert broker.placed[0]["qty"] > 0

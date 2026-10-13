@@ -509,17 +509,27 @@ def run_cycle(data: dict[str, pd.DataFrame], broker, date: str,
         # Only symbols Alpaca actually lists may be traded live; research-only
         # symbols are logged in the ledger but never ordered.
         for d in decisions:
-            if d.side in ("buy", "sell") and np.isfinite(d.price) and to_alpaca_symbol(d.symbol):
-                notional = abs(d.delta_weight) * equity
-                # Venue rejects sub-minimum crypto orders; skip before the
-                # round-trip rather than submitting a known-failing order.
-                if notional < MIN_ORDER_NOTIONAL:
-                    _log.info("skip %s %s: notional %.4f < min %.4f",
-                              d.side, d.symbol, notional, MIN_ORDER_NOTIONAL)
-                    continue
-                qty = broker.quantity_for_notional(d.symbol, notional, d.price)
-                if qty > 0:
-                    broker.submit(d.symbol, d.side, qty)
+            if d.side not in ("buy", "sell") or not to_alpaca_symbol(d.symbol):
+                continue
+            # A symbol that LEFT the target book (flat signal, or dropped from
+            # the universe) exits with price=NaN — plan_rebalance has no Target
+            # to read a price from. Mark it to today's close so the exit can
+            # actually be placed; without this the finite-price guard silently
+            # skipped every exit and a long-only book never closed a leg.
+            price = d.price if np.isfinite(d.price) else prices.get(d.symbol)
+            if price is None or not np.isfinite(price):
+                _log.warning("cannot price %s %s; exit skipped", d.side, d.symbol)
+                continue
+            notional = abs(d.delta_weight) * equity
+            # Venue rejects sub-minimum crypto orders; skip before the
+            # round-trip rather than submitting a known-failing order.
+            if notional < MIN_ORDER_NOTIONAL:
+                _log.info("skip %s %s: notional %.4f < min %.4f",
+                          d.side, d.symbol, notional, MIN_ORDER_NOTIONAL)
+                continue
+            qty = broker.quantity_for_notional(d.symbol, notional, price)
+            if qty > 0:
+                broker.submit(d.symbol, d.side, qty)
     return decisions
 
 
